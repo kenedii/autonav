@@ -7,6 +7,9 @@ import torch.nn as nn
 from torchvision import models
 from PIL import Image
 import io
+import os
+import zipfile
+import shutil
 import numpy as np
 from typing import Optional
 
@@ -15,6 +18,33 @@ app = FastAPI(
     description="Upload both an image and your trained .pth model → get instant steering prediction",
     version="2.0"
 )
+
+@app.post("/upload_dataset")
+async def upload_dataset(file: UploadFile = File(...)):
+    """
+    Upload a zip file containing dataset folders.
+    Unzips to ./data/
+    """
+    if not file.filename.endswith('.zip'):
+        raise HTTPException(status_code=400, detail="File must be a .zip")
+    
+    try:
+        # Create data directory if it doesn't exist
+        extract_root = os.path.join(os.getcwd(), "data")
+        os.makedirs(extract_root, exist_ok=True)
+        
+        # Read zip file content
+        content = await file.read()
+        with zipfile.ZipFile(io.BytesIO(content)) as zip_ref:
+            zip_ref.extractall(extract_root)
+            
+        return {
+            "message": "Dataset uploaded and extracted successfully",
+            "extract_path": extract_root,
+            "filename": file.filename
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process zip file: {str(e)}")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

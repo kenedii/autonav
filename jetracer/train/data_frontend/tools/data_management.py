@@ -6,6 +6,8 @@ import pandas as pd
 from PIL import Image
 from pathlib import Path
 import csv
+import zipfile
+import shutil
 
 # Session state with unique prefix to avoid conflicts
 if "dm_idx" not in st.session_state:
@@ -211,17 +213,61 @@ def old_frame_count(folder: str):
 # Main page function (NO SIDEBAR!)
 # ────────────────────────────────
 def show():
+    if "dm_current_folder" not in st.session_state:
+        st.session_state.dm_current_folder = None
+    if "dm_idx" not in st.session_state:
+        st.session_state.dm_idx = 0
+
     st.title("RC Car Dataset Viewer & Cleaner")
     st.markdown("View • Clean • Delete frames • Bulk actions • Create pixel-flattened dataset")
 
-    root_folder = st.text_input(
-        "Root folder:",
-        placeholder="e.g. X:\\coding_projects\\school\\jetracer1\\data",
-        key="dm_root"
+    # ────────────────────────────────
+    # Upload Section
+    # ────────────────────────────────
+    with st.expander("📂 Upload Dataset (Zip)", expanded=True):
+        uploaded_zip = st.file_uploader("Upload a zip file containing your run folders (e.g. run_1, run_2)", type="zip")
+        if uploaded_zip is not None:
+            if st.button("Extract & Load Data", type="primary"):
+                with st.spinner("Unzipping data..."):
+                    # Create a 'data' folder in the current working directory
+                    extract_root = os.path.join(os.getcwd(), "data")
+                    os.makedirs(extract_root, exist_ok=True)
+                    
+                    try:
+                        with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
+                            zip_ref.extractall(extract_root)
+                        st.success(f"Successfully extracted data to `{extract_root}`")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error extracting zip: {e}")
+
+    st.markdown("---")
+
+    # Scan for available directories in the current working directory
+    base_dir = os.getcwd()
+    # List directories, excluding hidden ones
+    available_dirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d)) and not d.startswith('.')]
+    available_dirs = sorted(available_dirs)
+    
+    # Option to use the current directory itself
+    available_dirs.insert(0, ".")
+
+    # Default to 'data' if it exists, otherwise '.'
+    default_ix = 0
+    if "data" in available_dirs:
+        default_ix = available_dirs.index("data")
+
+    root_folder_name = st.selectbox(
+        "Select Root Folder (containing run folders):",
+        options=available_dirs,
+        index=default_ix,
+        key="dm_root_select"
     )
+    
+    root_folder = os.path.join(base_dir, root_folder_name)
 
     if not root_folder or not os.path.isdir(root_folder):
-        st.info("Please enter a valid folder path.")
+        st.info("Please select a valid folder.")
         st.stop()
 
     # Button to create combined CSV

@@ -1,0 +1,11 @@
+streamlit
+fastapi
+uvicorn
+python-multipart
+requests
+pandas
+numpy
+pillow
+# CPU-only PyTorch
+torch --index-url https://download.pytorch.org/whl/cpu
+torchvision --index-url https://download.pytorch.org/whl/cpu
