@@ -3,19 +3,51 @@ import pyrealsense2 as rs
 import numpy as np
 import cv2
 import time
+import threading
+
+# Configuration
+CAMERA_TYPE = "realsense" # or "opencv"
+OPENCV_DEVICE_ID = 0
 
 # Global objects - created once
 pipeline = None
 align = None
+cap = None # for opencv
 # Store only RGB frame and the center depth value (float) to minimize bandwidth/CPU
 latest_frames = {"rgb": None, "depth_center": 0.0}
-import threading
+
 frame_lock = threading.Lock()
 stop_event = threading.Event()
+
+def set_camera_type(type_name, device_id=0):
+    global CAMERA_TYPE, OPENCV_DEVICE_ID
+    CAMERA_TYPE = type_name
+    OPENCV_DEVICE_ID = device_id
 
 def camera_worker():
     """Background fetcher: copies RGB, reads center depth only (float)."""
     global latest_frames
+    
+    if CAMERA_TYPE == "opencv":
+        while not stop_event.is_set():
+            if cap and cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    # OpenCV returns BGR, convert to RGB
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Resize to match expected dimensions if needed or keep raw
+                    # The original realsense config was 424x240. Let's try to stick to that or just use what we get.
+                    # record_data2 uses IMG_WIDTH = 160, IMG_HEIGHT = 120 so it resizes later anyway.
+                    
+                    with frame_lock:
+                        latest_frames["rgb"] = rgb
+                        latest_frames["depth_center"] = 0.0 # No depth for simple webcam
+                else:
+                    time.sleep(0.1)
+            else:
+                 time.sleep(0.1)
+        return
+
     while not stop_event.is_set():
         try:
             frames = pipeline.wait_for_frames(timeout_ms=2000)
@@ -39,7 +71,21 @@ def camera_worker():
             print(f"[RealSense Thread Error] {e}")
 
 def start_pipeline():
-    global pipeline, align
+    global pipeline, align, cap
+    
+    if CAMERA_TYPE == "opencv":
+        if cap is None:
+            cap = cv2.VideoCapture(OPENCV_DEVICE_ID)
+            # Set resolution to match realsense config roughly if possible, or just default
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 424)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+            print(f"[OpenCV] Camera started on device {OPENCV_DEVICE_ID}")
+            
+            stop_event.clear()
+            t = threading.Thread(target=camera_worker, daemon=True)
+            t.start()
+        return
+
     if pipeline is None:
         pipeline = rs.pipeline()
         config = rs.config()
@@ -61,10 +107,18 @@ def start_pipeline():
         t.start()
 
 def stop_pipeline():
-    global pipeline, align
+    global pipeline, align, cap
     stop_event.set()
     # Give the thread a moment to exit the loop
     time.sleep(0.5)
+    
+    if CAMERA_TYPE == "opencv":
+        if cap:
+            cap.release()
+            cap = None
+        print("[OpenCV] Camera stopped.")
+        return
+
     if pipeline:
         try:
             pipeline.stop()

@@ -20,9 +20,22 @@ import json
 import pygame
 from smbus2 import SMBus
 import cv2
-import realsense_full  # RealSense pipeline (your module)
+import realsense_full  # RealSense pipeline
 import numpy as np
 import select
+import argparse
+import queue
+
+# ================= ARGS =================
+parser = argparse.ArgumentParser()
+parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type")
+parser.add_argument("--device", type=int, default=0, help="Camera device ID (for opencv)")
+args = parser.parse_args()
+
+if args.camera in ["opencv", "other"]:
+    realsense_full.set_camera_type("opencv", args.device)
+else:
+    realsense_full.set_camera_type("realsense")
 
 # ================= INPUT MODE =================
 # Switch between local Xbox (direct USB/pygame) vs. network controller (from laptop)
@@ -180,14 +193,60 @@ def create_new_session():
 
 RUN_DIR = create_new_session()
 csv_path = os.path.join(RUN_DIR, "dataset.csv")
-
-# Initialize CSV with header
-with open(csv_path, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+csv_file = open(csv_path, "w", newline="")
+writer = csv.writer(csv_file)
+writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
 
 frame_idx = 0
-ram_buffer = []
+
+# ================= WRITER THREAD =================
+write_queue = queue.Queue(maxsize=100)
+
+def writer_worker():
+    global csv_file, writer
+    while True:
+        try:
+            item = write_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+            
+        if item is None:
+            break
+            
+        cmd = item[0]
+        
+        if cmd == "FRAME":
+            _, rgb, row_data, rgb_path = item
+            try:
+                # Resize here to offload 'recording_worker'
+                rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+                cv2.imwrite(rgb_path, rgb_small)
+                writer.writerow(row_data)
+                csv_file.flush()
+            except Exception as e:
+                print(f"Write error: {e}")
+                
+        elif cmd == "DELETE":
+            n = item[1]
+            try:
+                csv_file.close()
+                with open(csv_path, 'r') as f:
+                    lines = f.readlines()
+                # Keep header + (total - n) lines
+                keep_count = max(1, len(lines) - n)
+                with open(csv_path, 'w') as f:
+                    f.writelines(lines[:keep_count])
+                
+                # Reopen
+                csv_file = open(csv_path, "a", newline="")
+                writer = csv.writer(csv_file)
+                print(f"\n[Writer] Deleted last {n} entries from CSV.")
+            except Exception as e:
+                print(f"Delete error: {e}")
+                
+        write_queue.task_done()
+
+threading.Thread(target=writer_worker, daemon=True).start()
 
 # ================= HELPERS =================
 def pwm_to_norm(us):
@@ -202,88 +261,46 @@ def get_rgb_and_front_depth():
     if rgb is None:
         return None, None
     # center_depth is already a float (meters). No extra processing.
+    # We return FULL SIZE rgb here, resizing happens in writer_worker
     return rgb, float(center_depth)
 
-def save_buffer_to_disk():
-    global ram_buffer
-    # Stop recording first to prevent new appends
-    global recording
-    recording = False
-    time.sleep(0.5) # Wait for thread to stop
-    
-    if not ram_buffer:
+def delete_last_n(n):
+    global frame_idx
+    if frame_idx == 0:
+        print("\nNothing to delete")
         return
     
-    print(f"\nSaving {len(ram_buffer)} frames to disk... DO NOT POWER OFF")
-    
-    # Use a local writer to ensure file is open
-    with open(csv_path, "a", newline="") as f:
-        local_writer = csv.writer(f)
-        
-        for i, (rgb_full, row_data) in enumerate(ram_buffer):
-            try:
-                # Resize
-                rgb_small = cv2.resize(rgb_full, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
-                
-                # Save Image (row_data[-1] is the path)
-                path = row_data[-1]
-                cv2.imwrite(path, rgb_small)
-                
-                # Save CSV row
-                local_writer.writerow(row_data)
-                
-                if i % 50 == 0:
-                    print(f"\rSaved {i}/{len(ram_buffer)}...", end="")
-            except Exception as e:
-                print(f"[Save Error] {e}")
-                
-    print(f"\rSaved {len(ram_buffer)} frames successfully!          ")
-    ram_buffer.clear()
-
-def delete_last_n(n):
-    global frame_idx, ram_buffer
-    with recording_lock:
-        if not ram_buffer:
-            print("\nBuffer empty, nothing to delete")
-            return
-            
-        n = min(n, len(ram_buffer))
-        # Remove from RAM buffer
-        del ram_buffer[-n:]
-        frame_idx -= n
-        print(f"\nDeleted last {n} frames from RAM -> now at {frame_idx}")
+    frame_idx = max(0, frame_idx - n)
+    write_queue.put(("DELETE", n))
+    print(f"\nRequested delete of last {n} frames -> index reverted to {frame_idx}")
 
 def delete_current_session():
-    global frame_idx, ram_buffer, RUN_DIR, csv_path
+    global frame_idx, RUN_DIR, csv_path, csv_file, writer
     confirm = input(f"\nDelete current session '{RUN_DIR}'? [y/N]: ").strip().lower()
     if confirm == 'y':
-        with recording_lock:
-            ram_buffer.clear()
-            frame_idx = 0
-        print(f"Session cleared from RAM!")
-        # No need to delete files since we haven't written them yet
-        try:
-            os.rmdir(RUN_DIR)
-        except Exception:
-            pass
+        # Clear queue
+        with write_queue.mutex:
+            write_queue.queue.clear()
+            
+        csv_file.close()
+        for fname in os.listdir(RUN_DIR):
+            os.remove(os.path.join(RUN_DIR, fname))
+        os.rmdir(RUN_DIR)
         print(f"Session '{RUN_DIR}' deleted!")
         RUN_DIR = create_new_session()
         csv_path = os.path.join(RUN_DIR, "dataset.csv")
-        
-        # Initialize new CSV with header
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
-            
-        print(f"New session started: {RUN_DIR}")
+        csv_file = open(csv_path, "w", newline="")
+        writer = csv.writer(csv_file)
         writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
         frame_idx = 0
+
 
 # ================= SHARED STATE =================
 current_steer_us = STEERING_CENTER
 current_throttle_us = THROTTLE_CENTER
 recording = False
-recording_lock = threading.Lock()
+# recording_lock removed as we use queue for writing
+# recording_lock = threading.Lock()
 
 # Network controller state
 net_last_ts = 0.0
@@ -342,7 +359,7 @@ if USE_NETWORK_CONTROLLER:
 
 # ================= RECORDING THREAD =================
 def recording_worker():
-    global frame_idx, ram_buffer, recording, current_steer_us, current_throttle_us
+    global frame_idx, recording, current_steer_us, current_throttle_us
     last_save_time = 0
     last_steer_rec = STEERING_CENTER
     last_throttle_rec = THROTTLE_CENTER
@@ -360,7 +377,7 @@ def recording_worker():
                 t_us = current_throttle_us
                 
                 if abs(s_us - last_steer_rec) >= MIN_CHANGE_US or abs(t_us - last_throttle_rec) >= MIN_CHANGE_US:
-                    # Fetch frame - this is the slow part that was blocking the main loop
+                    # Fetch frame
                     rgb, depth_front = get_rgb_and_front_depth()
                     
                     if rgb is not None:
@@ -369,21 +386,24 @@ def recording_worker():
                         
                         rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
                         
-                        # Prepare data
                         row_data = [time.time(), s_us, t_us,
                                     pwm_to_norm(s_us), pwm_to_norm(t_us),
                                     depth_front, rgb_path]
                         
-                        # Store in RAM
-                        with recording_lock:
-                            ram_buffer.append((rgb, row_data))
+                        # Store in Queue
+                        if not write_queue.full():
+                            write_queue.put(("FRAME", rgb, row_data, rgb_path))
                             frame_idx += 1
-                        
+                            
+                            # Log occasionally
+                            if frame_idx % 2 == 0:
+                                print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
+                                      f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
+                        else:
+                            # Drop frame if queue full to preserve recording real-time sync
+                            pass
+                            
                         last_save_time = now
-                        
-                        if frame_idx % 10 == 0:
-                            print(f"\rRAM Buffer: {len(ram_buffer)} | S {pwm_to_norm(s_us):+0.3f} | "
-                                  f"T {pwm_to_norm(t_us):+0.3f} | Depth {depth_front:.2f}", end="")
             
             # Small sleep to prevent CPU hogging in this thread
             time.sleep(0.005)
@@ -513,7 +533,11 @@ except KeyboardInterrupt:
     print("\nStopping...")
 
 finally:
-    save_buffer_to_disk()
+    # Wait for queue to drain?
+    print("\nDraining write queue...")
+    write_queue.put(None) # Signal exit
+    write_queue.join()
+    
     neutralize()
     if not USE_NETWORK_CONTROLLER:
         pygame.quit()
