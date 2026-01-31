@@ -13,8 +13,8 @@ OPENCV_DEVICE_ID = 0
 pipeline = None
 align = None
 cap = None # for opencv
-# Store only RGB frame and the center depth value (float) to minimize bandwidth/CPU
-latest_frames = {"rgb": None, "depth_center": 0.0}
+# Store RGB, center depth, IR image and a small colorized depth map
+latest_frames = {"rgb": None, "depth_center": 0.0, "ir": None, "depth_map": None}
 
 frame_lock = threading.Lock()
 stop_event = threading.Event()
@@ -52,9 +52,11 @@ def camera_worker():
         try:
             frames = pipeline.wait_for_frames(timeout_ms=2000)
             aligned = align.process(frames)
-            
+
             color_frame = aligned.get_color_frame()
             depth_frame = aligned.get_depth_frame()
+            # Infrared stream index 1 (if enabled)
+            ir_frame = aligned.get_infrared_frame(1) if aligned else None
 
             if color_frame and depth_frame:
                 rgb = np.asanyarray(color_frame.get_data()).copy()
@@ -64,9 +66,35 @@ def camera_worker():
                 h = depth_frame.get_height()
                 depth_center = float(depth_frame.get_distance(w // 2, h // 2))
 
+                # Build a small colorized depth map for saving/preview
+                try:
+                    depth_data = np.asanyarray(depth_frame.get_data()).copy()
+                    # Normalize depth to 0..255 for visualization (clip to a reasonable range)
+                    depth_mm = depth_data.astype(np.float32)
+                    # Convert to meters if units provided by sensor; depth_data is in ushort of mm? keep relative
+                    # Use a simple normalization by percentile to avoid extreme values dominating
+                    vmax = np.percentile(depth_mm[depth_mm>0], 95) if np.any(depth_mm>0) else 1.0
+                    vmin = np.percentile(depth_mm[depth_mm>0], 5) if np.any(depth_mm>0) else 0.0
+                    if vmax <= vmin:
+                        vmax = vmin + 1.0
+                    norm = np.clip((depth_mm - vmin) / (vmax - vmin), 0.0, 1.0)
+                    depth_colormap = (255 * cv2.applyColorMap((255 * (1.0 - norm)).astype(np.uint8), cv2.COLORMAP_JET)).astype(np.uint8)
+                except Exception:
+                    depth_colormap = None
+
+                ir_image = None
+                if ir_frame:
+                    try:
+                        ir_image = np.asanyarray(ir_frame.get_data()).copy()
+                        # IR is single-channel; keep as-is (uint8)
+                    except Exception:
+                        ir_image = None
+
                 with frame_lock:
                     latest_frames["rgb"] = rgb
                     latest_frames["depth_center"] = depth_center
+                    latest_frames["ir"] = ir_image
+                    latest_frames["depth_map"] = depth_colormap
         except Exception as e:
             print(f"[RealSense Thread Error] {e}")
 
@@ -90,11 +118,12 @@ def start_pipeline():
         pipeline = rs.pipeline()
         config = rs.config()
 
-        # Enable ONLY RGB and Depth streams (Disable IR to save USB bandwidth/CPU)
+        # Enable RGB, Depth and IR streams.
         # Reduced resolution + 15 FPS to lower CPU load on Jetson Nano
         config.enable_stream(rs.stream.color, 424, 240, rs.format.rgb8, 15)
         config.enable_stream(rs.stream.depth, 424, 240, rs.format.z16, 15)
-        # config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 15) # DISABLED
+        # Infrared stream (index 1) - useful for IR dots / low-light visualization
+        config.enable_stream(rs.stream.infrared, 1, 424, 240, rs.format.y8, 15)
 
         pipeline.start(config)
 
@@ -105,6 +134,24 @@ def start_pipeline():
         # Start background thread
         t = threading.Thread(target=camera_worker, daemon=True)
         t.start()
+
+def get_all_frames():
+    """Return a tuple (rgb, depth_center, ir_image, depth_map).
+    Any of the images may be None if they are not available yet.
+    """
+    start_pipeline()
+    with frame_lock:
+        if latest_frames["rgb"] is None:
+            return None, None, None, None
+        rgb = latest_frames["rgb"].copy() if latest_frames["rgb"] is not None else None
+        depth_center = float(latest_frames.get("depth_center", 0.0) or 0.0)
+        ir = latest_frames.get("ir")
+        if ir is not None:
+            ir = ir.copy()
+        depth_map = latest_frames.get("depth_map")
+        if depth_map is not None:
+            depth_map = depth_map.copy()
+        return rgb, depth_center, ir, depth_map
 
 def stop_pipeline():
     global pipeline, align, cap

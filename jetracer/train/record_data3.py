@@ -30,6 +30,9 @@ import queue
 parser = argparse.ArgumentParser()
 parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type")
 parser.add_argument("--device", type=int, default=0, help="Camera device ID (for opencv)")
+parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+depth')
+parser.add_argument('--control_mode', type=str, default=None, choices=['joystick', 'steer_trigger'], help='Optional override for control mapping: "steer_trigger" uses left trigger for accel')
+parser.add_argument('--always_save', action='store_true', help='Save frames at TARGET_FPS even when controls have not changed')
 args = parser.parse_args()
 
 if args.camera in ["opencv", "other"]:
@@ -148,24 +151,31 @@ print("\nChoose control mode:")
 print("1: Left joystick only (horizontal: steer, vertical: throttle)")
 print("2: Left joystick for steer (horizontal), Right joystick for throttle (vertical)")
 print("3: Left joystick for steer (horizontal), Right trigger for accelerate, Left trigger for brake/reverse")
-while True:
-    mode_choice = input("Enter 1, 2, or 3: ").strip()
-    if mode_choice == '1':
-        cfg.THROTTLE_AXIS = cfg.THROTTLE_AXIS
-        mode = 1
-        print("Selected Mode 1: Left joystick controls both steering and throttle.")
-        break
-    elif mode_choice == '2':
-        cfg.THROTTLE_AXIS = cfg.RIGHT_THROTTLE_AXIS
-        mode = 2
-        print("Selected Mode 2: Left joystick for steering, Right joystick for throttle.")
-        break
-    elif mode_choice == '3':
-        mode = 3
-        print("Selected Mode 3: Left joystick for steering, RT/LT for accelerate/brake (normalized).")
-        break
-    else:
-        print("Invalid choice. Please enter 1, 2, or 3.")
+USE_LEFT_TRIGGER_ONLY = False
+if args.control_mode == 'steer_trigger':
+    # Non-interactive override: use steering on stick and left trigger for accelerate
+    mode = 3
+    USE_LEFT_TRIGGER_ONLY = True
+    print("Selected control_mode=steer_trigger: steering by stick, left trigger for accel")
+else:
+    while True:
+        mode_choice = input("Enter 1, 2, or 3: ").strip()
+        if mode_choice == '1':
+            cfg.THROTTLE_AXIS = cfg.THROTTLE_AXIS
+            mode = 1
+            print("Selected Mode 1: Left joystick controls both steering and throttle.")
+            break
+        elif mode_choice == '2':
+            cfg.THROTTLE_AXIS = cfg.RIGHT_THROTTLE_AXIS
+            mode = 2
+            print("Selected Mode 2: Left joystick for steering, Right joystick for throttle.")
+            break
+        elif mode_choice == '3':
+            mode = 3
+            print("Selected Mode 3: Left joystick for steering, RT/LT for accelerate/brake (normalized).")
+            break
+        else:
+            print("Invalid choice. Please enter 1, 2, or 3.")
 
 # ================= STEERING LIMIT SELECTION =================
 steering_limit_input = input("\nEnter steering limit % (1-100, enter for 100): ").strip()
@@ -195,7 +205,10 @@ RUN_DIR = create_new_session()
 csv_path = os.path.join(RUN_DIR, "dataset.csv")
 csv_file = open(csv_path, "w", newline="")
 writer = csv.writer(csv_file)
-writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+if args.record_mode == 'all' and args.camera == 'realsense':
+    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
+else:
+    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
 
 frame_idx = 0
 
@@ -221,6 +234,19 @@ def writer_worker():
                 # Resize here to offload 'recording_worker'
                 rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
                 cv2.imwrite(rgb_path, rgb_small)
+                writer.writerow(row_data)
+                csv_file.flush()
+            except Exception as e:
+                print(f"Write error: {e}")
+        elif cmd == "FRAME_ALL":
+            _, rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path = item
+            try:
+                rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+                cv2.imwrite(rgb_path, rgb_small)
+                if ir_image is not None and ir_path is not None:
+                    cv2.imwrite(ir_path, ir_image)
+                if depth_map is not None and depth_path is not None:
+                    cv2.imwrite(depth_path, depth_map)
                 writer.writerow(row_data)
                 csv_file.flush()
             except Exception as e:
@@ -254,14 +280,25 @@ def pwm_to_norm(us):
 
 def get_rgb_and_front_depth():
     if not CAMERA_ENABLED:
+        if args.record_mode == 'all' and args.camera == 'realsense':
+            return None, 0.0, None, None
         return None, 0.0
 
-    # Use optimized fetch: RGB frame + center depth float (already aligned)
+    # If user requested all frames and using RealSense, try to fetch RGB, IR and full depth map
+    if args.record_mode == 'all' and args.camera == 'realsense':
+        if hasattr(realsense_full, 'get_all_frames'):
+            rgb, center_depth, ir_image, depth_map = realsense_full.get_all_frames()
+        else:
+            rgb, center_depth = realsense_full.get_aligned_frames()
+            ir_image, depth_map = None, None
+        if rgb is None:
+            return None, None, None, None
+        return rgb, float(center_depth), ir_image, depth_map
+
+    # Default: RGB + single center depth
     rgb, center_depth = realsense_full.get_aligned_frames()
     if rgb is None:
         return None, None
-    # center_depth is already a float (meters). No extra processing.
-    # We return FULL SIZE rgb here, resizing happens in writer_worker
     return rgb, float(center_depth)
 
 def delete_last_n(n):
@@ -291,7 +328,10 @@ def delete_current_session():
         csv_path = os.path.join(RUN_DIR, "dataset.csv")
         csv_file = open(csv_path, "w", newline="")
         writer = csv.writer(csv_file)
-        writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+        if args.record_mode == 'all' and args.camera == 'realsense':
+            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
+        else:
+            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
         frame_idx = 0
 
 
@@ -376,34 +416,43 @@ def recording_worker():
                 s_us = current_steer_us
                 t_us = current_throttle_us
                 
-                if abs(s_us - last_steer_rec) >= MIN_CHANGE_US or abs(t_us - last_throttle_rec) >= MIN_CHANGE_US:
-                    # Fetch frame
-                    rgb, depth_front = get_rgb_and_front_depth()
-                    
-                    if rgb is not None:
-                        last_steer_rec = s_us
-                        last_throttle_rec = t_us
-                        
-                        rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
-                        
-                        row_data = [time.time(), s_us, t_us,
-                                    pwm_to_norm(s_us), pwm_to_norm(t_us),
-                                    depth_front, rgb_path]
-                        
-                        # Store in Queue
-                        if not write_queue.full():
-                            write_queue.put(("FRAME", rgb, row_data, rgb_path))
-                            frame_idx += 1
-                            
-                            # Log occasionally
-                            if frame_idx % 2 == 0:
-                                print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
-                                      f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
+                # Save if inputs changed beyond threshold OR user requested always-save
+                if args.always_save or abs(s_us - last_steer_rec) >= MIN_CHANGE_US or abs(t_us - last_throttle_rec) >= MIN_CHANGE_US:
+                        # Fetch frame(s) according to requested record_mode
+                        if args.record_mode == 'all' and args.camera == 'realsense':
+                            rgb, depth_front, ir_image, depth_map = get_rgb_and_front_depth()
+                            if rgb is not None:
+                                last_steer_rec = s_us
+                                last_throttle_rec = t_us
+                                rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                                ir_path = os.path.join(RUN_DIR, f"ir_{frame_idx:05d}.png") if ir_image is not None else None
+                                depth_path = os.path.join(RUN_DIR, f"depth_{frame_idx:05d}.png") if depth_map is not None else None
+                                row_data = [time.time(), s_us, t_us,
+                                            pwm_to_norm(s_us), pwm_to_norm(t_us),
+                                            depth_front, rgb_path, ir_path, depth_path]
+                                if not write_queue.full():
+                                    write_queue.put(("FRAME_ALL", rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path))
+                                    frame_idx += 1
+                                    if frame_idx % 2 == 0:
+                                        print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
+                                              f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
+                                last_save_time = now
                         else:
-                            # Drop frame if queue full to preserve recording real-time sync
-                            pass
-                            
-                        last_save_time = now
+                            rgb, depth_front = get_rgb_and_front_depth()
+                            if rgb is not None:
+                                last_steer_rec = s_us
+                                last_throttle_rec = t_us
+                                rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                                row_data = [time.time(), s_us, t_us,
+                                            pwm_to_norm(s_us), pwm_to_norm(t_us),
+                                            depth_front, rgb_path]
+                                if not write_queue.full():
+                                    write_queue.put(("FRAME", rgb, row_data, rgb_path))
+                                    frame_idx += 1
+                                    if frame_idx % 2 == 0:
+                                        print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
+                                              f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
+                                last_save_time = now
             
             # Small sleep to prevent CPU hogging in this thread
             time.sleep(0.005)
@@ -476,13 +525,20 @@ try:
 
             # THROTTLE selection by mode
             if mode == 3:
-                rt = (joystick.get_axis(cfg.RIGHT_TRIGGER_AXIS) + 1.0) / 2.0
-                lt = (joystick.get_axis(cfg.LEFT_TRIGGER_AXIS)  + 1.0) / 2.0
-                if rt < cfg.AXIS_DEADZONE:
-                    rt = 0.0
-                if lt < cfg.AXIS_DEADZONE:
-                    lt = 0.0
-                throttle_axis = rt - lt  # -1 -> +1
+                if USE_LEFT_TRIGGER_ONLY:
+                    # Use left trigger only for acceleration (0..1)
+                    lt = (joystick.get_axis(cfg.LEFT_TRIGGER_AXIS) + 1.0) / 2.0
+                    if lt < cfg.AXIS_DEADZONE:
+                        lt = 0.0
+                    throttle_axis = lt
+                else:
+                    rt = (joystick.get_axis(cfg.RIGHT_TRIGGER_AXIS) + 1.0) / 2.0
+                    lt = (joystick.get_axis(cfg.LEFT_TRIGGER_AXIS)  + 1.0) / 2.0
+                    if rt < cfg.AXIS_DEADZONE:
+                        rt = 0.0
+                    if lt < cfg.AXIS_DEADZONE:
+                        lt = 0.0
+                    throttle_axis = rt - lt  # -1 -> +1
             else:
                 raw_thr = -joystick.get_axis(cfg.THROTTLE_AXIS)
                 raw_thr = apply_deadzone(raw_thr)

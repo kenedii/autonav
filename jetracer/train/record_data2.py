@@ -23,6 +23,9 @@ import realsense_full  # Your verified RealSense pipeline
 parser = argparse.ArgumentParser()
 parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type")
 parser.add_argument("--device", type=int, default=0, help="Camera device ID (for opencv)")
+parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+depth')
+parser.add_argument('--control_mode', type=str, default='joystick', choices=['joystick', 'steer_trigger'], help='Control mapping: "joystick" (default) or "steer_trigger" (steer by stick, left trigger for accel)')
+parser.add_argument('--always_save', action='store_true', help='Save frames at TARGET_FPS even when controls have not changed')
 args = parser.parse_args()
 
 if args.camera in ["opencv", "other"]:
@@ -37,6 +40,7 @@ class Config:
     THROTTLE_CHANNEL = 1
     STEERING_AXIS = 0
     THROTTLE_AXIS = 1
+    LEFT_TRIGGER_AXIS = 2
     PWM_FREQ = 50
     IMG_WIDTH = 160
     IMG_HEIGHT = 120
@@ -103,25 +107,30 @@ RUN_DIR = create_new_session()
 csv_path = os.path.join(RUN_DIR, "dataset.csv")
 csv_file = open(csv_path, "w", newline="")
 writer = csv.writer(csv_file)
-writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+if args.record_mode == 'all' and args.camera == 'realsense':
+    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
+else:
+    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
 frame_idx = 0
 
 # ================= WRITER THREAD =================
 write_queue = queue.Queue(maxsize=100)
 
 def writer_worker():
+    """Background writer: handles FRAME, FRAME_ALL and DELETE commands from the queue."""
     global csv_file, writer
     while True:
         try:
             item = write_queue.get(timeout=0.5)
         except queue.Empty:
             continue
-            
+
         if item is None:
+            # Shutdown signal
+            write_queue.task_done()
             break
-            
+
         cmd = item[0]
-        
         if cmd == "FRAME":
             _, rgb, row_data, rgb_path = item
             try:
@@ -130,7 +139,20 @@ def writer_worker():
                 csv_file.flush()
             except Exception as e:
                 print(f"Write error: {e}")
-                
+
+        elif cmd == "FRAME_ALL":
+            _, rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path = item
+            try:
+                cv2.imwrite(rgb_path, rgb)
+                if ir_image is not None and ir_path is not None:
+                    cv2.imwrite(ir_path, ir_image)
+                if depth_map is not None and depth_path is not None:
+                    cv2.imwrite(depth_path, depth_map)
+                writer.writerow(row_data)
+                csv_file.flush()
+            except Exception as e:
+                print(f"Write error: {e}")
+
         elif cmd == "DELETE":
             n = item[1]
             try:
@@ -141,14 +163,13 @@ def writer_worker():
                 keep_count = max(1, len(lines) - n)
                 with open(csv_path, 'w') as f:
                     f.writelines(lines[:keep_count])
-                
                 # Reopen
                 csv_file = open(csv_path, "a", newline="")
                 writer = csv.writer(csv_file)
                 print(f"\n[Writer] Deleted last {n} entries from CSV.")
             except Exception as e:
                 print(f"Delete error: {e}")
-                
+
         write_queue.task_done()
 
 threading.Thread(target=writer_worker, daemon=True).start()
@@ -159,13 +180,19 @@ def pwm_to_norm(us):
 
 def get_rgb_and_front_depth():
     # Use optimized fetch from realsense_full which works for both RealSense and OpenCV
-    rgb, depth_center = realsense_full.get_aligned_frames()
-    
-    if rgb is None:
-        return None, None
-        
-    rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
-    return rgb_small, depth_center
+    if args.record_mode == 'all' and args.camera == 'realsense':
+        # Try to get all data (RGB, IR, depth)
+        rgb, depth_center, ir_image, depth_map = realsense_full.get_all_frames() if hasattr(realsense_full, 'get_all_frames') else (None, None, None, None)
+        if rgb is None:
+            return None, None, None, None
+        rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+        return rgb_small, depth_center, ir_image, depth_map
+    else:
+        rgb, depth_center = realsense_full.get_aligned_frames()
+        if rgb is None:
+            return None, None
+        rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+        return rgb_small, depth_center
 
 def delete_last_n(n):
     global frame_idx
@@ -196,7 +223,10 @@ def delete_current_session():
         csv_path = os.path.join(RUN_DIR, "dataset.csv")
         csv_file = open(csv_path, "w", newline="")
         writer = csv.writer(csv_file)
-        writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+        if args.record_mode == 'all' and args.camera == 'realsense':
+            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
+        else:
+            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
         frame_idx = 0
 
 # ================= INPUT THREAD =================
@@ -233,10 +263,18 @@ try:
     last_save_time = 0
     while True:
         pygame.event.pump()
-        steer = -joystick.get_axis(cfg.STEERING_AXIS)
-        throttle_axis = -joystick.get_axis(cfg.THROTTLE_AXIS)
+        # Two control modes: full joystick (default), or steer via stick + left trigger for accel
+        if args.control_mode == 'steer_trigger':
+            steer = -joystick.get_axis(cfg.STEERING_AXIS)
+            lt = (joystick.get_axis(cfg.LEFT_TRIGGER_AXIS) + 1.0) / 2.0
+            if lt < 0.03:
+                lt = 0.0
+            throttle_axis = lt
+        else:
+            steer = -joystick.get_axis(cfg.STEERING_AXIS)
+            throttle_axis = -joystick.get_axis(cfg.THROTTLE_AXIS)
 
-        # Cap throttle to 30% of max
+        # Cap throttle to configured max (supports negative for reverse if available)
         throttle_axis = max(min(throttle_axis, cfg.THROTTLE_MAX_SCALE), -cfg.THROTTLE_MAX_SCALE)
 
         steer_us = int(STEERING_CENTER + steer*(STEERING_MAX - STEERING_CENTER))
@@ -247,25 +285,42 @@ try:
 
         now = time.time()
         if recording and now - last_save_time >= 1.0 / cfg.TARGET_FPS:
-            if abs(steer_us-last_steer) >= MIN_CHANGE_US or abs(throttle_us-last_throttle) >= MIN_CHANGE_US:
+            # Save either when inputs changed beyond threshold OR when user requested always-save
+            if args.always_save or abs(steer_us-last_steer) >= MIN_CHANGE_US or abs(throttle_us-last_throttle) >= MIN_CHANGE_US:
                 last_steer, last_throttle = steer_us, throttle_us
-                rgb, depth_front = get_rgb_and_front_depth()
-                if rgb is not None:
-                    rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
-                    
-                    # Push to queue to avoid blocking control loop
-                    if not write_queue.full():
-                        row_data = [time.time(), steer_us, throttle_us,
-                                    pwm_to_norm(steer_us), pwm_to_norm(throttle_us),
-                                    depth_front, rgb_path]
-                        write_queue.put(("FRAME", rgb, row_data, rgb_path))
-                        
-                        frame_idx += 1
-                        last_save_time = now
-                        print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(steer_us):+0.3f} | "
-                              f"T {pwm_to_norm(throttle_us):+0.3f} | D {depth_front:.2f}", end="")
-                    else:
-                        print(f"\r[WARN] Write queue full! Dropping frame.       ", end="")
+                if args.record_mode == 'all' and args.camera == 'realsense':
+                    rgb, depth_front, ir_image, depth_map = get_rgb_and_front_depth()
+                    if rgb is not None:
+                        rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                        ir_path = os.path.join(RUN_DIR, f"ir_{frame_idx:05d}.png") if ir_image is not None else None
+                        depth_path = os.path.join(RUN_DIR, f"depth_{frame_idx:05d}.png") if depth_map is not None else None
+                        if not write_queue.full():
+                            row_data = [time.time(), steer_us, throttle_us,
+                                        pwm_to_norm(steer_us), pwm_to_norm(throttle_us),
+                                        depth_front, rgb_path, ir_path, depth_path]
+                            # Save all images
+                            write_queue.put(("FRAME_ALL", rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path))
+                            frame_idx += 1
+                            last_save_time = now
+                            print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(steer_us):+0.3f} | "
+                                  f"T {pwm_to_norm(throttle_us):+0.3f} | D {depth_front:.2f}", end="")
+                        else:
+                            print(f"\r[WARN] Write queue full! Dropping frame.       ", end="")
+                else:
+                    rgb, depth_front = get_rgb_and_front_depth()
+                    if rgb is not None:
+                        rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                        if not write_queue.full():
+                            row_data = [time.time(), steer_us, throttle_us,
+                                        pwm_to_norm(steer_us), pwm_to_norm(throttle_us),
+                                        depth_front, rgb_path]
+                            write_queue.put(("FRAME", rgb, row_data, rgb_path))
+                            frame_idx += 1
+                            last_save_time = now
+                            print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(steer_us):+0.3f} | "
+                                  f"T {pwm_to_norm(throttle_us):+0.3f} | D {depth_front:.2f}", end="")
+                        else:
+                            print(f"\r[WARN] Write queue full! Dropping frame.       ", end="")
 
         time.sleep(0.01)
 
