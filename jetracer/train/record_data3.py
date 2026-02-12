@@ -20,9 +20,25 @@ import json
 import pygame
 from smbus2 import SMBus
 import cv2
-import realsense_full  # RealSense pipeline (your module)
+import realsense_full  # RealSense pipeline
 import numpy as np
 import select
+import argparse
+import queue
+
+# ================= ARGS =================
+parser = argparse.ArgumentParser()
+parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type")
+parser.add_argument("--device", type=int, default=0, help="Camera device ID (for opencv)")
+parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+depth')
+parser.add_argument('--control_mode', type=str, default=None, choices=['joystick', 'steer_trigger'], help='Optional override for control mapping: "steer_trigger" uses left trigger for accel')
+parser.add_argument('--always_save', action='store_true', help='Save frames at TARGET_FPS even when controls have not changed')
+args = parser.parse_args()
+
+if args.camera in ["opencv", "other"]:
+    realsense_full.set_camera_type("opencv", args.device)
+else:
+    realsense_full.set_camera_type("realsense")
 
 # ================= INPUT MODE =================
 # Switch between local Xbox (direct USB/pygame) vs. network controller (from laptop)
@@ -135,24 +151,31 @@ print("\nChoose control mode:")
 print("1: Left joystick only (horizontal: steer, vertical: throttle)")
 print("2: Left joystick for steer (horizontal), Right joystick for throttle (vertical)")
 print("3: Left joystick for steer (horizontal), Right trigger for accelerate, Left trigger for brake/reverse")
-while True:
-    mode_choice = input("Enter 1, 2, or 3: ").strip()
-    if mode_choice == '1':
-        cfg.THROTTLE_AXIS = cfg.THROTTLE_AXIS
-        mode = 1
-        print("Selected Mode 1: Left joystick controls both steering and throttle.")
-        break
-    elif mode_choice == '2':
-        cfg.THROTTLE_AXIS = cfg.RIGHT_THROTTLE_AXIS
-        mode = 2
-        print("Selected Mode 2: Left joystick for steering, Right joystick for throttle.")
-        break
-    elif mode_choice == '3':
-        mode = 3
-        print("Selected Mode 3: Left joystick for steering, RT/LT for accelerate/brake (normalized).")
-        break
-    else:
-        print("Invalid choice. Please enter 1, 2, or 3.")
+USE_LEFT_TRIGGER_ONLY = False
+if args.control_mode == 'steer_trigger':
+    # Non-interactive override: use steering on stick and left trigger for accelerate
+    mode = 3
+    USE_LEFT_TRIGGER_ONLY = True
+    print("Selected control_mode=steer_trigger: steering by stick, left trigger for accel")
+else:
+    while True:
+        mode_choice = input("Enter 1, 2, or 3: ").strip()
+        if mode_choice == '1':
+            cfg.THROTTLE_AXIS = cfg.THROTTLE_AXIS
+            mode = 1
+            print("Selected Mode 1: Left joystick controls both steering and throttle.")
+            break
+        elif mode_choice == '2':
+            cfg.THROTTLE_AXIS = cfg.RIGHT_THROTTLE_AXIS
+            mode = 2
+            print("Selected Mode 2: Left joystick for steering, Right joystick for throttle.")
+            break
+        elif mode_choice == '3':
+            mode = 3
+            print("Selected Mode 3: Left joystick for steering, RT/LT for accelerate/brake (normalized).")
+            break
+        else:
+            print("Invalid choice. Please enter 1, 2, or 3.")
 
 # ================= STEERING LIMIT SELECTION =================
 steering_limit_input = input("\nEnter steering limit % (1-100, enter for 100): ").strip()
@@ -180,14 +203,76 @@ def create_new_session():
 
 RUN_DIR = create_new_session()
 csv_path = os.path.join(RUN_DIR, "dataset.csv")
-
-# Initialize CSV with header
-with open(csv_path, "w", newline="") as f:
-    writer = csv.writer(f)
+csv_file = open(csv_path, "w", newline="")
+writer = csv.writer(csv_file)
+if args.record_mode == 'all' and args.camera == 'realsense':
+    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
+else:
     writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
 
 frame_idx = 0
-ram_buffer = []
+
+# ================= WRITER THREAD =================
+write_queue = queue.Queue(maxsize=100)
+
+def writer_worker():
+    global csv_file, writer
+    while True:
+        try:
+            item = write_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+            
+        if item is None:
+            break
+            
+        cmd = item[0]
+        
+        if cmd == "FRAME":
+            _, rgb, row_data, rgb_path = item
+            try:
+                # Resize here to offload 'recording_worker'
+                rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+                cv2.imwrite(rgb_path, rgb_small)
+                writer.writerow(row_data)
+                csv_file.flush()
+            except Exception as e:
+                print(f"Write error: {e}")
+        elif cmd == "FRAME_ALL":
+            _, rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path = item
+            try:
+                rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+                cv2.imwrite(rgb_path, rgb_small)
+                if ir_image is not None and ir_path is not None:
+                    cv2.imwrite(ir_path, ir_image)
+                if depth_map is not None and depth_path is not None:
+                    cv2.imwrite(depth_path, depth_map)
+                writer.writerow(row_data)
+                csv_file.flush()
+            except Exception as e:
+                print(f"Write error: {e}")
+                
+        elif cmd == "DELETE":
+            n = item[1]
+            try:
+                csv_file.close()
+                with open(csv_path, 'r') as f:
+                    lines = f.readlines()
+                # Keep header + (total - n) lines
+                keep_count = max(1, len(lines) - n)
+                with open(csv_path, 'w') as f:
+                    f.writelines(lines[:keep_count])
+                
+                # Reopen
+                csv_file = open(csv_path, "a", newline="")
+                writer = csv.writer(csv_file)
+                print(f"\n[Writer] Deleted last {n} entries from CSV.")
+            except Exception as e:
+                print(f"Delete error: {e}")
+                
+        write_queue.task_done()
+
+threading.Thread(target=writer_worker, daemon=True).start()
 
 # ================= HELPERS =================
 def pwm_to_norm(us):
@@ -195,95 +280,67 @@ def pwm_to_norm(us):
 
 def get_rgb_and_front_depth():
     if not CAMERA_ENABLED:
+        if args.record_mode == 'all' and args.camera == 'realsense':
+            return None, 0.0, None, None
         return None, 0.0
 
-    # Use optimized fetch: RGB frame + center depth float (already aligned)
+    # If user requested all frames and using RealSense, try to fetch RGB, IR and full depth map
+    if args.record_mode == 'all' and args.camera == 'realsense':
+        if hasattr(realsense_full, 'get_all_frames'):
+            rgb, center_depth, ir_image, depth_map = realsense_full.get_all_frames()
+        else:
+            rgb, center_depth = realsense_full.get_aligned_frames()
+            ir_image, depth_map = None, None
+        if rgb is None:
+            return None, None, None, None
+        return rgb, float(center_depth), ir_image, depth_map
+
+    # Default: RGB + single center depth
     rgb, center_depth = realsense_full.get_aligned_frames()
     if rgb is None:
         return None, None
-    # center_depth is already a float (meters). No extra processing.
     return rgb, float(center_depth)
 
-def save_buffer_to_disk():
-    global ram_buffer
-    # Stop recording first to prevent new appends
-    global recording
-    recording = False
-    time.sleep(0.5) # Wait for thread to stop
-    
-    if not ram_buffer:
+def delete_last_n(n):
+    global frame_idx
+    if frame_idx == 0:
+        print("\nNothing to delete")
         return
     
-    print(f"\nSaving {len(ram_buffer)} frames to disk... DO NOT POWER OFF")
-    
-    # Use a local writer to ensure file is open
-    with open(csv_path, "a", newline="") as f:
-        local_writer = csv.writer(f)
-        
-        for i, (rgb_full, row_data) in enumerate(ram_buffer):
-            try:
-                # Resize
-                rgb_small = cv2.resize(rgb_full, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
-                
-                # Save Image (row_data[-1] is the path)
-                path = row_data[-1]
-                cv2.imwrite(path, rgb_small)
-                
-                # Save CSV row
-                local_writer.writerow(row_data)
-                
-                if i % 50 == 0:
-                    print(f"\rSaved {i}/{len(ram_buffer)}...", end="")
-            except Exception as e:
-                print(f"[Save Error] {e}")
-                
-    print(f"\rSaved {len(ram_buffer)} frames successfully!          ")
-    ram_buffer.clear()
-
-def delete_last_n(n):
-    global frame_idx, ram_buffer
-    with recording_lock:
-        if not ram_buffer:
-            print("\nBuffer empty, nothing to delete")
-            return
-            
-        n = min(n, len(ram_buffer))
-        # Remove from RAM buffer
-        del ram_buffer[-n:]
-        frame_idx -= n
-        print(f"\nDeleted last {n} frames from RAM -> now at {frame_idx}")
+    frame_idx = max(0, frame_idx - n)
+    write_queue.put(("DELETE", n))
+    print(f"\nRequested delete of last {n} frames -> index reverted to {frame_idx}")
 
 def delete_current_session():
-    global frame_idx, ram_buffer, RUN_DIR, csv_path
+    global frame_idx, RUN_DIR, csv_path, csv_file, writer
     confirm = input(f"\nDelete current session '{RUN_DIR}'? [y/N]: ").strip().lower()
     if confirm == 'y':
-        with recording_lock:
-            ram_buffer.clear()
-            frame_idx = 0
-        print(f"Session cleared from RAM!")
-        # No need to delete files since we haven't written them yet
-        try:
-            os.rmdir(RUN_DIR)
-        except Exception:
-            pass
+        # Clear queue
+        with write_queue.mutex:
+            write_queue.queue.clear()
+            
+        csv_file.close()
+        for fname in os.listdir(RUN_DIR):
+            os.remove(os.path.join(RUN_DIR, fname))
+        os.rmdir(RUN_DIR)
         print(f"Session '{RUN_DIR}' deleted!")
         RUN_DIR = create_new_session()
         csv_path = os.path.join(RUN_DIR, "dataset.csv")
-        
-        # Initialize new CSV with header
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
+        csv_file = open(csv_path, "w", newline="")
+        writer = csv.writer(csv_file)
+        if args.record_mode == 'all' and args.camera == 'realsense':
+            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
+        else:
             writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
-            
-        print(f"New session started: {RUN_DIR}")
-        writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
         frame_idx = 0
+
 
 # ================= SHARED STATE =================
 current_steer_us = STEERING_CENTER
 current_throttle_us = THROTTLE_CENTER
 recording = False
-recording_lock = threading.Lock()
+# recording_lock removed as we use queue for writing
+# recording_lock = threading.Lock()
 
 # Network controller state
 net_last_ts = 0.0
@@ -342,7 +399,7 @@ if USE_NETWORK_CONTROLLER:
 
 # ================= RECORDING THREAD =================
 def recording_worker():
-    global frame_idx, ram_buffer, recording, current_steer_us, current_throttle_us
+    global frame_idx, recording, current_steer_us, current_throttle_us
     last_save_time = 0
     last_steer_rec = STEERING_CENTER
     last_throttle_rec = THROTTLE_CENTER
@@ -359,31 +416,43 @@ def recording_worker():
                 s_us = current_steer_us
                 t_us = current_throttle_us
                 
-                if abs(s_us - last_steer_rec) >= MIN_CHANGE_US or abs(t_us - last_throttle_rec) >= MIN_CHANGE_US:
-                    # Fetch frame - this is the slow part that was blocking the main loop
-                    rgb, depth_front = get_rgb_and_front_depth()
-                    
-                    if rgb is not None:
-                        last_steer_rec = s_us
-                        last_throttle_rec = t_us
-                        
-                        rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
-                        
-                        # Prepare data
-                        row_data = [time.time(), s_us, t_us,
-                                    pwm_to_norm(s_us), pwm_to_norm(t_us),
-                                    depth_front, rgb_path]
-                        
-                        # Store in RAM
-                        with recording_lock:
-                            ram_buffer.append((rgb, row_data))
-                            frame_idx += 1
-                        
-                        last_save_time = now
-                        
-                        if frame_idx % 10 == 0:
-                            print(f"\rRAM Buffer: {len(ram_buffer)} | S {pwm_to_norm(s_us):+0.3f} | "
-                                  f"T {pwm_to_norm(t_us):+0.3f} | Depth {depth_front:.2f}", end="")
+                # Save if inputs changed beyond threshold OR user requested always-save
+                if args.always_save or abs(s_us - last_steer_rec) >= MIN_CHANGE_US or abs(t_us - last_throttle_rec) >= MIN_CHANGE_US:
+                        # Fetch frame(s) according to requested record_mode
+                        if args.record_mode == 'all' and args.camera == 'realsense':
+                            rgb, depth_front, ir_image, depth_map = get_rgb_and_front_depth()
+                            if rgb is not None:
+                                last_steer_rec = s_us
+                                last_throttle_rec = t_us
+                                rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                                ir_path = os.path.join(RUN_DIR, f"ir_{frame_idx:05d}.png") if ir_image is not None else None
+                                depth_path = os.path.join(RUN_DIR, f"depth_{frame_idx:05d}.png") if depth_map is not None else None
+                                row_data = [time.time(), s_us, t_us,
+                                            pwm_to_norm(s_us), pwm_to_norm(t_us),
+                                            depth_front, rgb_path, ir_path, depth_path]
+                                if not write_queue.full():
+                                    write_queue.put(("FRAME_ALL", rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path))
+                                    frame_idx += 1
+                                    if frame_idx % 2 == 0:
+                                        print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
+                                              f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
+                                last_save_time = now
+                        else:
+                            rgb, depth_front = get_rgb_and_front_depth()
+                            if rgb is not None:
+                                last_steer_rec = s_us
+                                last_throttle_rec = t_us
+                                rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                                row_data = [time.time(), s_us, t_us,
+                                            pwm_to_norm(s_us), pwm_to_norm(t_us),
+                                            depth_front, rgb_path]
+                                if not write_queue.full():
+                                    write_queue.put(("FRAME", rgb, row_data, rgb_path))
+                                    frame_idx += 1
+                                    if frame_idx % 2 == 0:
+                                        print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
+                                              f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
+                                last_save_time = now
             
             # Small sleep to prevent CPU hogging in this thread
             time.sleep(0.005)
@@ -456,13 +525,20 @@ try:
 
             # THROTTLE selection by mode
             if mode == 3:
-                rt = (joystick.get_axis(cfg.RIGHT_TRIGGER_AXIS) + 1.0) / 2.0
-                lt = (joystick.get_axis(cfg.LEFT_TRIGGER_AXIS)  + 1.0) / 2.0
-                if rt < cfg.AXIS_DEADZONE:
-                    rt = 0.0
-                if lt < cfg.AXIS_DEADZONE:
-                    lt = 0.0
-                throttle_axis = rt - lt  # -1 -> +1
+                if USE_LEFT_TRIGGER_ONLY:
+                    # Use left trigger only for acceleration (0..1)
+                    lt = (joystick.get_axis(cfg.LEFT_TRIGGER_AXIS) + 1.0) / 2.0
+                    if lt < cfg.AXIS_DEADZONE:
+                        lt = 0.0
+                    throttle_axis = lt
+                else:
+                    rt = (joystick.get_axis(cfg.RIGHT_TRIGGER_AXIS) + 1.0) / 2.0
+                    lt = (joystick.get_axis(cfg.LEFT_TRIGGER_AXIS)  + 1.0) / 2.0
+                    if rt < cfg.AXIS_DEADZONE:
+                        rt = 0.0
+                    if lt < cfg.AXIS_DEADZONE:
+                        lt = 0.0
+                    throttle_axis = rt - lt  # -1 -> +1
             else:
                 raw_thr = -joystick.get_axis(cfg.THROTTLE_AXIS)
                 raw_thr = apply_deadzone(raw_thr)
@@ -513,7 +589,11 @@ except KeyboardInterrupt:
     print("\nStopping...")
 
 finally:
-    save_buffer_to_disk()
+    # Wait for queue to drain?
+    print("\nDraining write queue...")
+    write_queue.put(None) # Signal exit
+    write_queue.join()
+    
     neutralize()
     if not USE_NETWORK_CONTROLLER:
         pygame.quit()

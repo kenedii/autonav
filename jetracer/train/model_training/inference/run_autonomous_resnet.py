@@ -14,7 +14,14 @@ import torch
 import time
 import signal
 import sys
+import argparse
 from smbus2 import SMBus
+
+# ------------------- PARSE ARGS -------------------
+parser = argparse.ArgumentParser(description='Autonomous Driving')
+parser.add_argument('--backend', type=str, default='cuda', choices=['cuda', 'rknn'],
+                    help='Inference backend: "cuda" (PyTorch/TRT) or "rknn" (NPU)')
+args = parser.parse_args()
 
 # ------------------- TRY TO LOAD TensorRT -------------------
 try:
@@ -29,6 +36,7 @@ except ImportError:
 MODEL_ARCHITECTURE = 'resnet18'  # Set to 'resnet18', 'resnet34', 'resnet50', or 'resnet101'
 MODEL_TRT_PATH   = f"checkpoints/model_5_{MODEL_ARCHITECTURE}/best_model_trt.pth"
 MODEL_PYTORCH_PATH = f"checkpoints/model_5_{MODEL_ARCHITECTURE}/best_model.pth"
+MODEL_RKNN_PATH = f"best_model.rknn"
 
 FIXED_THROTTLE_NORM = 0.22        # 0.20–0.25 works great
 STEERING_GAIN = 1.0
@@ -86,10 +94,57 @@ THROTTLE_CENTER = 1500
 THROTTLE_MIN    = 1200   # Don't go below ~1200 or ESC beeps
 THROTTLE_MAX    = 1900
 
+# ------------------- WRAPPERS -------------------
+class RKNNWrapper:
+    def __init__(self, model_path, target='rk3588'):
+        print(f"[RKNN] Loading model: {model_path}")
+        try:
+            from rknnlite.api import RKNNLite
+        except ImportError:
+            print("[RKNN] rknnlite not found, comparing with standard rknn...")
+            from rknn.api import RKNN as RKNNLite
+
+        self.rknn = RKNNLite()
+        
+        # Load RKNN model
+        ret = self.rknn.load_rknn(model_path)
+        if ret != 0:
+            print('[RKNN] Load model failed!')
+            sys.exit(ret)
+            
+        # Init runtime environment
+        if hasattr(RKNNLite, 'NPU_CORE_0'):
+            ret = self.rknn.init_runtime(core_mask=RKNNLite.NPU_CORE_0)
+        else:
+            ret = self.rknn.init_runtime()
+        
+        if ret != 0:
+            print('[RKNN] Init runtime environment failed!')
+            sys.exit(ret)
+            
+        print('[RKNN] Model loaded and runtime initialized!')
+
+    def __call__(self, x):
+        # x is numpy array [1, 3, 120, 160] (float32 0-1)
+        # rknnlite expects list of inputs
+        outputs = self.rknn.inference(inputs=[x])
+        # Output is list of numpy arrays. Our model returns 1 output.
+        # Return as tensor so .item() works in main
+        return torch.from_numpy(outputs[0])
+
 # ------------------- LOAD MODEL (TRT first) -------------------
-DEVICE = torch.device("cuda")
+DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 def load_model():
+    if args.backend == 'rknn':
+        if not os.path.exists(MODEL_RKNN_PATH):
+             # Try looking in checkpoints folder if not in root
+             alt_path = f"checkpoints/model_5_{MODEL_ARCHITECTURE}/best_model.rknn"
+             if os.path.exists(alt_path):
+                 return RKNNWrapper(alt_path)
+             raise FileNotFoundError(f"RKNN Model not found at {MODEL_RKNN_PATH} or {alt_path}")
+        return RKNNWrapper(MODEL_RKNN_PATH)
+
     if HAS_TRT and os.path.exists(MODEL_TRT_PATH):
         print("[FAST] Loading TensorRT model (10-14 FPS expected)")
         model = TRTModule()
@@ -170,7 +225,13 @@ def get_frame():
 # ------------------- FAST PREPROCESS -------------------
 def preprocess(frame):
     img = cv2.resize(frame, (160, 120))
-    img = img.transpose(2, 0, 1)                  # HWC → CHW
+    img = img.transpose(2, 0, 1)                  # HWC -> CHW
+    
+    # RKNN Backend: Return numpy float32 [0-1]
+    if args.backend == 'rknn':
+        img = img.astype(np.float32) / 255.0
+        return img.reshape(1, 3, 120, 160)
+
     tensor = torch.from_numpy(img).float().div(255.0)
     return tensor.unsqueeze(0).to(DEVICE)
 
@@ -191,7 +252,13 @@ def main():
 
     # Warm-up model (critical for TRT first-run timing)
     print("Warming up model...")
-    dummy = torch.ones((1, 3, 120, 160), device=DEVICE)
+    if args.backend == 'rknn':
+        dummy = np.zeros((1, 3, 120, 160), dtype=np.float32)
+        # First specific run for RKNN to init buffers
+        model(dummy)
+    else:
+        dummy = torch.ones((1, 3, 120, 160), device=DEVICE)
+    
     for _ in range(10):
         model(dummy)
     print("Warm-up complete!\n")

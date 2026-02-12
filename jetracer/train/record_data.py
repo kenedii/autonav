@@ -11,8 +11,16 @@ import time
 import os
 import csv
 import threading
+import argparse
+import cv2
 from datetime import datetime
 import Jetson.GPIO as GPIO
+
+# ================= ARGS =================
+parser = argparse.ArgumentParser()
+parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type: realsense or opencv")
+parser.add_argument("--device", type=int, default=0, help="Camera device ID (for opencv)")
+args = parser.parse_args()
 
 # ================= CONFIG =================
 STEERING_PIN = 0  # Not used, car controlled via PCA9685 directly
@@ -30,32 +38,62 @@ csv_file = open(CSV_PATH, "w", newline="")
 writer = csv.writer(csv_file)
 writer.writerow(["filename", "steer", "throttle"])
 
-# ================== REALSENSE ==================
-pipeline = rs.pipeline()
-config = rs.config()
-config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, TARGET_FPS)
-config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, TARGET_FPS)
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, TARGET_FPS)
-
-pipeline.start(config)
-align = rs.align(rs.stream.color)
-
+# ================== CAMERA SETUP ==================
 latest_frames = {"rgb": None, "ir": None, "depth": None}
 lock = threading.Lock()
 
+pipeline = None
+cap = None
+
+if args.camera == "realsense":
+    pipeline = rs.pipeline()
+    config = rs.config()
+    config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, TARGET_FPS)
+    config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, TARGET_FPS)
+    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, TARGET_FPS)
+
+    pipeline.start(config)
+    align = rs.align(rs.stream.color)
+else:
+    cap = cv2.VideoCapture(args.device)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    print(f"OpenCV Camera started on device {args.device}")
+
 def camera_thread():
     global latest_frames
-    while True:
-        frames = pipeline.wait_for_frames()
-        aligned = align.process(frames)
-        color = aligned.get_color_frame()
-        depth = aligned.get_depth_frame()
-        ir = aligned.get_infrared_frame(1)
-        if color and depth and ir:
-            with lock:
-                latest_frames["rgb"] = np.asanyarray(color.get_data())
-                latest_frames["depth"] = np.asanyarray(depth.get_data())
-                latest_frames["ir"] = np.asanyarray(ir.get_data())
+    if args.camera == "realsense":
+        while True:
+            try:
+                frames = pipeline.wait_for_frames()
+                aligned = align.process(frames)
+                color = aligned.get_color_frame()
+                depth = aligned.get_depth_frame()
+                ir = aligned.get_infrared_frame(1)
+                if color and depth and ir:
+                    with lock:
+                        latest_frames["rgb"] = np.asanyarray(color.get_data())
+                        latest_frames["depth"] = np.asanyarray(depth.get_data())
+                        latest_frames["ir"] = np.asanyarray(ir.get_data())
+            except Exception as e:
+                print(f"RS Error: {e}")
+    else:
+        while True:
+            if cap and cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Create dummy depth/ir matching size
+                    h, w, c = rgb.shape
+                    dummy_depth = np.zeros((h, w), dtype=np.uint16)
+                    dummy_ir = np.zeros((h, w), dtype=np.uint8)
+                    
+                    with lock:
+                        latest_frames["rgb"] = rgb
+                        latest_frames["depth"] = dummy_depth
+                        latest_frames["ir"] = dummy_ir
+                else:
+                    time.sleep(0.01)
 
 threading.Thread(target=camera_thread, daemon=True).start()
 
@@ -154,7 +192,11 @@ except KeyboardInterrupt:
     print("\nStopping...")
 
 finally:
-    pipeline.stop()
+    if args.camera == "realsense" and pipeline:
+        pipeline.stop()
+    elif cap:
+        cap.release()
+        
     csv_file.close()
     pygame.quit()
     print(f"DATA SAVED -> {RUN_DIR}")
