@@ -53,7 +53,7 @@
                 <div class="fleet-list-panel">
                     <div class="panel-header">
                         <h2>Fleet List</h2>
-                        <button class="btn-primary" onclick="showAddModal()">+ Add Client</button>
+                        <button class="btn-primary" onclick="addTestClient()">+ Add Test Client</button>
                     </div>
                     <ul id="car-list" class="car-list">
                         <!-- Populated by JS -->
@@ -71,33 +71,39 @@
                             <button class="btn-danger-outline" onclick="deleteCar()">Remove</button>
                         </div>
                         
-                        <div class="detail-info">
-                            <p><strong>IP Address:</strong> <span id="detail-ip"></span></p>
-                            <p><strong>Location:</strong> <span id="detail-geo"></span></p>
-                            <p><strong>Activity:</strong> <span id="detail-activity">Idle</span></p>
-                            <p><strong>FPS:</strong> <span id="detail-fps">0</span></p>
-                            <div id="imu-info" style="margin-top:5px; font-size:0.9em; color:#bbb;">
-                                <p><strong>IMU Accel:</strong> <span id="imu-accel">N/A</span></p>
-                                <p><strong>IMU Gyro:</strong> <span id="imu-gyro">N/A</span></p>
-                            </div>
+                        <div class="client-tabs-nav">
+                            <button class="client-tab-btn active" onclick="openClientTab('overview')">Overview</button>
+                            <button class="client-tab-btn" onclick="openClientTab('specs')">Specs</button>
                         </div>
 
-                        <div class="control-group">
-                            <h3>Live Controls</h3>
-                            <div class="btn-row">
-                                <button class="btn-success" onclick="controlAction('start')">START</button>
-                                <button class="btn-warning" onclick="controlAction('pause')">PAUSE</button>
-                                <button class="btn-danger" onclick="controlAction('stop')">STOP</button>
-                                <button class="btn-primary" onclick="controlAction('resume')">RESUME</button>
+                        <div id="client-tab-overview" class="client-tab-pane active">
+                            <div class="detail-info">
+                                <p><strong>IP Address:</strong> <span id="detail-ip"></span></p>
+                                <p><strong>Location:</strong> <span id="detail-geo"></span></p>
+                                <p><strong>Activity:</strong> <span id="detail-activity">Idle</span></p>
+                                <p><strong>FPS:</strong> <span id="detail-fps">0</span></p>
+                                <div id="imu-info" style="margin-top:5px; font-size:0.9em; color:#bbb;">
+                                    <p><strong>IMU Accel:</strong> <span id="imu-accel">N/A</span></p>
+                                    <p><strong>IMU Gyro:</strong> <span id="imu-gyro">N/A</span></p>
+                                </div>
                             </div>
-                        </div>
+    
+                            <div class="control-group">
+                                <h3>Live Controls</h3>
+                                <div class="btn-row">
+                                    <button class="btn-success" onclick="controlAction('start')">START</button>
+                                    <button class="btn-warning" onclick="controlAction('pause')">PAUSE</button>
+                                    <button class="btn-danger" onclick="controlAction('stop')">STOP</button>
+                                    <button class="btn-primary" onclick="controlAction('resume')">RESUME</button>
+                                </div>
+                            </div>
 
-                        <div class="control-group">
-                            <h3>Tuning</h3>
-                            <div class="form-row">
-                                <label>Mode:</label>
-                                <select id="tune-mode" onchange="updateSettings()">
-                                    <option value="fixed">Fixed Throttle</option>
+                            <div class="control-group">
+                                <h3>Tuning</h3>
+                                <div class="form-row">
+                                    <label>Mode:</label>
+                                    <select id="tune-mode" onchange="updateSettings()">
+                                        <option value="fixed">Fixed Throttle</option>
                                     <option value="ai">AI Control</option>
                                 </select>
                             </div>
@@ -129,7 +135,20 @@
                                 <div id="slam-coords">X: 0.0 Y: 0.0 &theta;: 0.0</div>
                             </div>
                         </div>
+                    </div> <!-- End of client-tab-overview -->
+
+                    <div id="client-tab-specs" class="client-tab-pane" style="display:none; padding:1rem;">
+                        <h3>Hardware Specifications</h3>
+                        <table class="specs-table">
+                            <tr><td><strong>Device:</strong></td><td id="spec-device">Loading...</td></tr>
+                            <tr><td><strong>CPU/RAM:</strong></td><td id="spec-cpu">Loading...</td></tr>
+                            <tr><td><strong>Cameras:</strong></td><td id="spec-cameras">Loading...</td></tr>
+                            <tr><td><strong>Inference:</strong></td><td id="spec-inference">Loading...</td></tr>
+                            <tr><td><strong>ResNet Version:</strong></td><td id="spec-resnet">Loading...</td></tr>
+                            <tr><td><strong>YOLO Version:</strong></td><td id="spec-yolo">Loading...</td></tr>
+                        </table>
                     </div>
+                </div> <!-- End of car-detail-content -->
                 </div>
             </div>
         </section>
