@@ -3,6 +3,8 @@ import numpy as np
 import time
 from smbus2 import SMBus
 import sys
+import platform
+import subprocess
 
 # Try importing pyrealsense2, handle if missing
 try:
@@ -42,6 +44,41 @@ class PCA9685:
         """Convert microseconds -> correct 12-bit off value at 50Hz"""
         pulse = int(microseconds * 4096 * 50 / 1000000 + 0.5)
         self.set_pwm(channel, 0, pulse)
+
+def get_cpu_ram_info():
+    try:
+        # Simple linux commands
+        cpu_info = subprocess.check_output("cat /proc/cpuinfo | grep 'model name' | head -1", shell=True).decode().strip().split(': ')[1]
+    except:
+        cpu_info = platform.machine() # fallback
+    
+    try:
+        mem_info = subprocess.check_output("free -h | grep Mem | awk '{print $2}'", shell=True).decode().strip()
+    except:
+        mem_info = "Unknown"
+        
+    return f"{cpu_info} / {mem_info}"
+
+def get_system_specs(cameras=[]):
+    """
+    Gather hardware specs.
+    cameras: list of camera objects or configs
+    """
+    specs = {
+        "device": f"{platform.system()} {platform.release()}",
+        "cpu_ram": get_cpu_ram_info(),
+        "cameras": [],
+        "inference": "CUDA (GPU)" if cv2.cuda.getCudaEnabledDeviceCount() > 0 else "CPU",
+        "resnet_version": "ResNet-101 (Default)",
+        "yolo_version": "YOLOv8n (Default)"
+    }
+    
+    # Process cameras
+    # This expects the 'cameras' arg to be the list of CameraConfig or actual Camera objects
+    # For now, let's just describe what's passed or check connected devices
+    # But since main.py manages the camera objects, we can just pass the config.
+    
+    return specs
 
 class CameraInterface:
     def read(self):
