@@ -8,6 +8,8 @@ import uvicorn
 import json
 import os
 import asyncio
+import uuid
+import random
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -146,6 +148,40 @@ def get_cars():
     # For UI responsiveness, let's just return what we have, 
     # and let the UI trigger a 'refresh' 
     return list(db.cars.values())
+
+@app.post("/api/test-client")
+def add_test_client():
+    """Adds a simulated client for UI testing."""
+    client_id = f"test-client-{uuid.uuid4().hex[:8]}"
+    db.cars[client_id] = {
+        "id": client_id,
+        "name": f"Test Racer {random.randint(1, 99)}",
+        "ip": "127.0.0.1",
+        "port": 0,
+        "status": "online",
+        "details": {
+            "running": True,
+            "paused": False,
+            "state": {
+                "fps": 30,
+                "location": {"x": 0, "y": 0, "theta": 0},
+                "specs": {
+                    "device": "NVIDIA Jetson Nano",
+                    "cpu_ram": "4-core ARMv57 / 4GB LPDDR4",
+                    "cameras": [
+                        {"type": "RealSense D435i", "width": 640, "height": 480, "fps": 30},
+                        {"type": "CSI Camera", "width": 1280, "height": 720, "fps": 60}
+                    ],
+                    "inference": "CUDA (GPU)",
+                    "resnet_version": "ResNet-101",
+                    "yolo_version": "YOLOv8n"
+                }
+            }
+        },
+        "geo": {"city": "Sim City", "country": "Virtual Land"},
+        "type": "virtual"
+    }
+    return {"status": "added", "id": client_id}
 
 @app.post("/api/cars")
 def add_car(car: NewClient):
