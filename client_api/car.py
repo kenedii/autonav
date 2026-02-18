@@ -7,11 +7,11 @@ import math
 from typing import List, Dict, Any
 
 try:
-    from .hardware import PCA9685, get_camera
+    from .hardware import PCA9685, get_camera, get_system_specs
     from .models import AutonomousDriver, ObjectDetector
     from .slam import VisualSlamSystem
 except ImportError:
-    from hardware import PCA9685, get_camera
+    from hardware import PCA9685, get_camera, get_system_specs
     from models import AutonomousDriver, ObjectDetector
     from slam import VisualSlamSystem
 
@@ -27,9 +27,16 @@ class CarClient:
             "location": None, 
             "last_action": None, 
             "fps": 0,
-            "detections": []
+            "detections": [],
+            "specs": {}
         }
         
+        # Get immediate specs
+        try:
+            self.state["specs"] = get_system_specs() 
+        except Exception as e:
+            logger.warning(f"Failed to get system specs: {e}")
+
         self.camera = None
         self.pca = None
         self.control_model = None
@@ -98,8 +105,25 @@ class CarClient:
                 config["detection_model"] = os.path.expanduser(config["detection_model"])
 
             # Set action loop first before initializing hardware/models
-            self.action_loop = config.get("action_loop", ['control', 'api'])
+            self.action_loop = config.get("action_loop", ["control", "api"])
+            
+            # --- Update Specs from Config ---
+            try:
+                specs = get_system_specs(config.get("cameras", []))
+                if config.get("architecture"): 
+                    specs["resnet_version"] = config["architecture"]
+                if config.get("detection_model"): 
+                    specs["yolo_version"] = os.path.basename(config["detection_model"])
+                self.state["specs"] = specs
+            except Exception as e:
+                logger.warning(f"Error updating specs: {e}")
 
+            # Re-init Camera if needed
+            if "cameras" in config:
+                if self.camera:
+                    self.camera.release()
+                    self.camera = None
+            
             # Stop existing but don't join thread if we are called FROM the thread (avoid deadlock)
             self.running = False 
             if self.camera:
