@@ -12,6 +12,25 @@ function openTab(tabName) {
     document.querySelector(`button[onclick="openTab('${tabName}')"]`).classList.add('active');
 }
 
+function openClientTab(tabName) {
+    document.querySelectorAll('.client-tab-pane').forEach(el => {
+        el.style.display = 'none';
+        el.classList.remove('active');
+    });
+    document.querySelectorAll('.client-tab-btn').forEach(el => el.classList.remove('active'));
+    
+    const content = document.getElementById(`client-tab-${tabName}`);
+    if(content) {
+        content.style.display = 'block';
+        content.classList.add('active');
+    }
+    
+    // Find button to highlight
+    const btns = document.querySelectorAll('.client-tab-btn');
+    if (tabName === 'overview') btns[0].classList.add('active');
+    if (tabName === 'specs') btns[1].classList.add('active');
+}
+
 // --- Poll Data ---
 async function fetchCars() {
     try {
@@ -153,6 +172,24 @@ function updateDetailView() {
        // Let's pass the car object or details
        drawSlamMap(car);
     }
+
+    // Update Specs Tab
+    const specs = d.state?.specs || {}; 
+    document.getElementById('spec-device').innerText = specs.device || 'Unknown';
+    document.getElementById('spec-cpu').innerText = specs.cpu_ram || 'Unknown';
+    
+    // Format cameras nicely
+    let camText = 'None';
+    if (specs.cameras && Array.isArray(specs.cameras)) {
+        camText = specs.cameras.map(c => `${c.type} (${c.width}x${c.height})`).join(', ');
+    } else if (specs.cameras) {
+        camText = specs.cameras;
+    }
+    document.getElementById('spec-cameras').innerText = camText;
+    
+    document.getElementById('spec-inference').innerText = specs.inference || 'Unknown';
+    document.getElementById('spec-resnet').innerText = specs.resnet_version || 'Unknown';
+    document.getElementById('spec-yolo').innerText = specs.yolo_version || 'Unknown';
 }
 
 function updateHomeStats() {
@@ -163,6 +200,17 @@ function updateHomeStats() {
 }
 
 // --- Actions ---
+async function addTestClient() {
+    try {
+        const res = await fetch('/api/test-client', { method: 'POST' });
+        if(!res.ok) throw new Error(await res.text());
+        fetchCars();
+    } catch(e) {
+        alert("Error adding test client: " + e.message);
+    }
+}
+
+// Deprecated: was for manual add
 async function addCar() {
     const name = document.getElementById('new-name').value;
     const ip = document.getElementById('new-ip').value;
