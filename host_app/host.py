@@ -10,13 +10,20 @@ class CarAgent:
         self.base_url = f"http://{ip}:{port}"
         self.password = password
         self.config = {}
-        
+
+    def _headers(self):
+        """Return auth headers for every request."""
+        return {"X-Api-Key": self.password}
+
     def check_connection(self):
         try:
-            r = requests.get(f"{self.base_url}/status", timeout=2)
+            r = requests.get(f"{self.base_url}/status", headers=self._headers(), timeout=2)
             if r.status_code == 200:
                 print(f"[{self.name}] Online. Status: {r.json()['running']}")
                 return True
+            elif r.status_code == 401:
+                print(f"[{self.name}] Authentication failed – wrong password?")
+                return False
         except Exception:
             print(f"[{self.name}] Offline or not reachable at {self.ip}")
             return False
@@ -26,9 +33,13 @@ class CarAgent:
         config_dict['ip'] = self.ip
         config_dict['port'] = self.port
         config_dict['password'] = self.password
-        
+
         try:
-            r = requests.post(f"{self.base_url}/configure", json=config_dict)
+            r = requests.post(
+                f"{self.base_url}/configure",
+                json=config_dict,
+                headers=self._headers(),
+            )
             if r.status_code == 200:
                 print(f"[{self.name}] Configuration deployed.")
                 self.config = config_dict
@@ -39,28 +50,28 @@ class CarAgent:
 
     def start(self):
         try:
-            requests.post(f"{self.base_url}/start")
+            requests.post(f"{self.base_url}/start", headers=self._headers())
             print(f"[{self.name}] Started.")
         except:
             pass
 
     def stop(self):
         try:
-            requests.post(f"{self.base_url}/stop")
+            requests.post(f"{self.base_url}/stop", headers=self._headers())
             print(f"[{self.name}] Stopped.")
         except:
             pass
-    
+
     def pause(self, duration=None):
         try:
-            requests.post(f"{self.base_url}/pause", json={"duration": duration})
+            requests.post(f"{self.base_url}/pause", json={"duration": duration}, headers=self._headers())
             print(f"[{self.name}] Paused.")
         except:
             pass
 
     def resume(self):
         try:
-            requests.post(f"{self.base_url}/resume")
+            requests.post(f"{self.base_url}/resume", headers=self._headers())
             print(f"[{self.name}] Resumed.")
         except:
             pass
@@ -69,16 +80,16 @@ class CarAgent:
         payload = {}
         if throttle_mode: payload['throttle_mode'] = throttle_mode
         if fixed_throttle_value: payload['fixed_throttle_value'] = fixed_throttle_value
-        
+
         try:
-            r = requests.post(f"{self.base_url}/update_settings", json=payload)
+            r = requests.post(f"{self.base_url}/update_settings", json=payload, headers=self._headers())
             print(f"[{self.name}] Settings updated: {r.json()}")
         except:
             pass
 
     def get_status(self):
         try:
-            return requests.get(f"{self.base_url}/status").json()
+            return requests.get(f"{self.base_url}/status", headers=self._headers()).json()
         except:
             return None
 
