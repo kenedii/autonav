@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JetRacer Host Manager</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Chart.js for Analytics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+    <!-- Header / Tabs -->
+    <header>
+        <div class="logo-group">
+            <div class="logo">🏎️ JetRacer Host</div>
+            <div class="host-ip-display" id="host-ip-info">Host IP: ...</div>
+        </div>
+        <nav>
+            <button class="tab-btn active" onclick="openTab('home')">Home</button>
+            <button class="tab-btn" onclick="openTab('fleet')">Fleet</button>
+            <button class="tab-btn" onclick="openTab('analytics')">Analytics</button>
+            <button class="tab-btn" onclick="openTab('settings')">Settings</button>
+        </nav>
+    </header>
+
+    <!-- Main Content -->
+    <main>
+        
+        <!-- HOME TAB -->
+        <section id="home" class="tab-content active">
+            <div class="hero">
+                <h1>Welcome to Autonomous Fleet Manager</h1>
+                <p>Monitor, Configure, and Deploy your autonomous vehicles.</p>
+                <div class="stats-cards">
+                    <div class="card">
+                        <h3>Active Cars</h3>
+                        <span id="stat-active">0</span>
+                    </div>
+                    <div class="card">
+                        <h3>Total Fleet</h3>
+                        <span id="stat-total">0</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- FLEET TAB -->
+        <section id="fleet" class="tab-content">
+            <div class="fleet-container">
+                
+                <!-- Left: Fleet List -->
+                <div class="fleet-list-panel">
+                    <div class="panel-header">
+                        <h2>Fleet List</h2>
+                        <button class="btn-primary" onclick="addTestClient()">+ Add Test Client</button>
+                    </div>
+                    <ul id="car-list" class="car-list">
+                        <!-- Populated by JS -->
+                    </ul>
+                </div>
+
+                <!-- Right: Fleet Details -->
+                <div class="fleet-detail-panel" id="detail-panel">
+                    <div class="empty-state">Select a car to view details</div>
+                    
+                    <div id="car-detail-content" style="display:none;">
+                        <div class="detail-header">
+                            <h2 id="detail-name">Car Name</h2>
+                            <span class="status-pill" id="detail-status">Online</span>
+                            <button class="btn-danger-outline" onclick="deleteCar()">Remove</button>
+                        </div>
+                        
+                        <div class="client-tabs-nav">
+                            <button class="client-tab-btn active" onclick="openClientTab('overview')">Overview</button>
+                            <button class="client-tab-btn" onclick="openClientTab('specs')">Specs</button>
+                        </div>
+
+                        <div id="client-tab-overview" class="client-tab-pane active">
+                            <div class="detail-info">
+                                <p><strong>IP Address:</strong> <span id="detail-ip"></span></p>
+                                <p><strong>Location:</strong> <span id="detail-geo"></span></p>
+                                <p><strong>Activity:</strong> <span id="detail-activity">Idle</span></p>
+                                <p><strong>FPS:</strong> <span id="detail-fps">0</span></p>
+                                <div id="imu-info" style="margin-top:5px; font-size:0.9em; color:#bbb;">
+                                    <p><strong>IMU Accel:</strong> <span id="imu-accel">N/A</span></p>
+                                    <p><strong>IMU Gyro:</strong> <span id="imu-gyro">N/A</span></p>
+                                </div>
+                            </div>
+    
+                            <div class="control-group">
+                                <h3>Live Controls</h3>
+                                <div class="btn-row">
+                                    <button class="btn-success" onclick="controlAction('start')">START</button>
+                                    <button class="btn-warning" onclick="controlAction('pause')">PAUSE</button>
+                                    <button class="btn-danger" onclick="controlAction('stop')">STOP</button>
+                                    <button class="btn-primary" onclick="controlAction('resume')">RESUME</button>
+                                </div>
+                            </div>
+
+                            <div class="control-group">
+                                <h3>Tuning</h3>
+                                <div class="form-row">
+                                    <label>Mode:</label>
+                                    <select id="tune-mode" onchange="updateSettings()">
+                                        <option value="fixed">Fixed Throttle</option>
+                                    <option value="ai">AI Control</option>
+                                </select>
+                            </div>
+                            <div class="form-row">
+                                <label>Throttle:</label>
+                                <input type="number" id="tune-throttle" step="0.01" value="0.22" onchange="updateSettings()">
+                            </div>
+                        </div>
+                        
+                        <div class="control-group">
+                            <h3>System Configuration</h3>
+                            <button class="btn-secondary" onclick="openConfigModal()">Edit Configuration</button>
+                        </div>
+
+                        <div class="control-group">
+                            <h3>Live Detections</h3>
+                            <ul id="detection-list">
+                                <li>No objects detected</li>
+                            </ul>
+                        </div>
+
+                        <!-- New Panel for SLAM / Map -->
+                        <div class="control-group">
+                            <h3>Map / SLAM</h3>
+                            <canvas id="slam-map" width="400" height="300" style="border:1px solid #333; background:#000;"></canvas>
+                            <div class="slam-controls">
+                                <p>Click on map to set destination</p>
+                                <button class="btn-danger-outline" onclick="cancelNavigation()">Cancel Nav</button>
+                                <div id="slam-coords">X: 0.0 Y: 0.0 &theta;: 0.0</div>
+                            </div>
+                        </div>
+                    </div> <!-- End of client-tab-overview -->
+
+                    <div id="client-tab-specs" class="client-tab-pane" style="display:none; padding:1rem;">
+                        <h3>Hardware Specifications</h3>
+                        <table class="specs-table">
+                            <tr><td><strong>Device:</strong></td><td id="spec-device">Loading...</td></tr>
+                            <tr><td><strong>CPU/RAM:</strong></td><td id="spec-cpu">Loading...</td></tr>
+                            <tr><td><strong>Cameras:</strong></td><td id="spec-cameras">Loading...</td></tr>
+                            <tr><td><strong>Inference:</strong></td><td id="spec-inference">Loading...</td></tr>
+                            <tr><td><strong>ResNet Version:</strong></td><td id="spec-resnet">Loading...</td></tr>
+                            <tr><td><strong>YOLO Version:</strong></td><td id="spec-yolo">Loading...</td></tr>
+                        </table>
+                    </div>
+                </div> <!-- End of car-detail-content -->
+                </div>
+            </div>
+        </section>
+
+        <!-- ANALYTICS TAB -->
+        <section id="analytics" class="tab-content">
+            <h2>Fleet Analytics</h2>
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>Fleet Status</h3>
+                    <canvas id="statusChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>FPS Performance</h3>
+                    <canvas id="fpsChart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- SETTINGS TAB -->
+        <section id="settings" class="tab-content">
+            <h2>Global Settings</h2>
+            <div class="control-group" style="max-width: 500px">
+                <h3>Host Preferences</h3>
+                <div class="form-row">
+                    <label>Poll Interval (ms):</label>
+                    <input type="number" id="setting-poll" value="2000">
+                </div>
+                <div class="form-row">
+                    <label>Default API Timeout (s):</label>
+                    <input type="number" id="setting-timeout" value="2">
+                </div>
+                <div class="btn-row">
+                   <button class="btn-primary" onclick="saveGlobalSettings()">Save Settings</button>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Modal for Adding Car -->
+    <div id="add-modal" class="modal">
+        <div class="modal-content">
+            <h3>Add New Car</h3>
+            <input type="text" id="new-name" placeholder="Car Name (e.g. Racer 1)">
+            <input type="text" id="new-ip" placeholder="IP Address (e.g. 192.168.1.50)">
+            <input type="number" id="new-port" placeholder="Port" value="8000">
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeAddModal()">Cancel</button>
+                <button class="btn-primary" onclick="addCar()">Add</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Modal for Config Car -->
+    <div id="config-modal" class="modal">
+        <div class="modal-content" style="width: 600px;">
+            <h3>Edit Car Configuration</h3>
+            <div class="scroll-form" style="max-height: 60vh; overflow-y: auto; margin-bottom: 1rem;">
+                
+                <h4>Camera</h4>
+                <div class="form-row"><label>Type:</label>
+                    <select id="cfg-cam-type">
+                        <option value="opencv">OpenCV</option>
+                        <option value="realsense">RealSense</option>
+                    </select>
+                </div>
+                 <div class="form-row"><label>Width:</label><input type="number" id="cfg-cam-w" value="640"></div>
+                 <div class="form-row"><label>Height:</label><input type="number" id="cfg-cam-h" value="480"></div>
+                 <div class="form-row"><label>FPS:</label><input type="number" id="cfg-cam-fps" value="30"></div>
+                 
+                 <h4>Models</h4>
+                 <div class="form-row"><label>Control Backend:</label>
+                    <select id="cfg-ctl-type">
+                        <option value="pytorch">PyTorch</option>
+                        <option value="tensorrt">TensorRT</option>
+                        <option value="rockchip">Rockchip NPU</option>
+                    </select>
+                 </div>
+                 <div class="form-row"><label>Architecture:</label>
+                    <select id="cfg-ctl-arch">
+                        <option value="resnet18">ResNet-18</option>
+                        <option value="resnet34">ResNet-34</option>
+                        <option value="resnet50">ResNet-50</option>
+                        <option value="resnet101">ResNet-101</option>
+                    </select>
+                 </div>
+                 <div class="form-row"><label>Control Model Path:</label><input type="text" id="cfg-ctl-path" value="checkpoints/best_model.pth"></div>
+                 <small style="color: #888; margin-top: -10px; display: block; margin-bottom: 10px;">Use absolute path on Jetson, e.g. /home/jetson/...</small>
+                 
+                 <div class="form-row"><label>Detection Model Path:</label><input type="text" id="cfg-det-path" value="yolov8n.pt"></div>
+                 
+                 <h4>Runtime</h4>
+                 <div class="form-row"><label>Device:</label><input type="text" id="cfg-device" value="cuda"></div>
+                 <div class="form-row"><label>Action Loop (comma sep):</label><input type="text" id="cfg-actions" value="control,detection,api"></div>
+            
+            </div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="resetConfigToDefaults()" style="margin-right: auto;">Reset to Defaults</button>
+                <button class="btn-secondary" onclick="closeConfigModal()">Cancel</button>
+                <button class="btn-success" onclick="deployConfig()">Deploy Config</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
