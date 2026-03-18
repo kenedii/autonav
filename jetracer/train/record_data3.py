@@ -33,6 +33,14 @@ parser.add_argument("--device", type=int, default=0, help="Camera device ID (for
 parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+depth')
 parser.add_argument('--control_mode', type=str, default=None, choices=['joystick', 'steer_trigger'], help='Optional override for control mapping: "steer_trigger" uses left trigger for accel')
 parser.add_argument('--always_save', action='store_true', help='Save frames at TARGET_FPS even when controls have not changed')
+parser.add_argument('--view_360', action='store_true', help='Also record two Jetson CSI cameras connected to CAM0/CAM1')
+parser.add_argument('--view_360_cam0_sensor_id', type=int, default=0, help='Jetson CSI sensor-id for the CAM0 360 camera')
+parser.add_argument('--view_360_cam1_sensor_id', type=int, default=1, help='Jetson CSI sensor-id for the CAM1 360 camera')
+parser.add_argument('--view_360_width', type=int, default=640, help='Capture width for the 360 cameras')
+parser.add_argument('--view_360_height', type=int, default=480, help='Capture height for the 360 cameras')
+parser.add_argument('--view_360_fps', type=int, default=15, help='Capture FPS for the 360 cameras')
+parser.add_argument('--view_360_cam0_flip_method', type=int, default=0, help='nvvidconv flip-method for CAM0 (0-7)')
+parser.add_argument('--view_360_cam1_flip_method', type=int, default=0, help='nvvidconv flip-method for CAM1 (0-7)')
 args = parser.parse_args()
 
 if args.camera in ["opencv", "other"]:
@@ -85,6 +93,132 @@ class Config:
     AXIS_DEADZONE = 0.03
 
 cfg = Config()
+
+
+class CsiCameraStream:
+    """Low-latency Jetson CSI camera reader backed by nvarguscamerasrc."""
+
+    def __init__(self, sensor_id, width, height, fps, flip_method=0, label="CAM"):
+        self.sensor_id = sensor_id
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.flip_method = flip_method
+        self.label = label
+        self.cap = None
+        self.thread = None
+        self.stop_event = threading.Event()
+        self.frame_lock = threading.Lock()
+        self.latest_frame = None
+
+    @staticmethod
+    def build_pipeline(sensor_id, width, height, fps, flip_method):
+        return (
+            f"nvarguscamerasrc sensor-id={sensor_id} ! "
+            "video/x-raw(memory:NVMM), "
+            f"width=(int){width}, height=(int){height}, "
+            f"format=(string)NV12, framerate=(fraction){fps}/1 ! "
+            f"nvvidconv flip-method={flip_method} ! "
+            f"video/x-raw, width=(int){width}, height=(int){height}, format=(string)BGRx ! "
+            "videoconvert ! "
+            "video/x-raw, format=(string)BGR ! "
+            "appsink drop=true max-buffers=1 sync=false"
+        )
+
+    def start(self):
+        if self.cap is not None:
+            return True
+
+        pipeline = self.build_pipeline(
+            self.sensor_id,
+            self.width,
+            self.height,
+            self.fps,
+            self.flip_method,
+        )
+        self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if not self.cap.isOpened():
+            print(f"[360] Failed to open {self.label} on sensor-id={self.sensor_id}")
+            self.cap.release()
+            self.cap = None
+            return False
+
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._reader, daemon=True)
+        self.thread.start()
+        print(
+            f"[360] {self.label} started on sensor-id={self.sensor_id} "
+            f"({self.width}x{self.height}@{self.fps}, flip={self.flip_method})"
+        )
+        return True
+
+    def _reader(self):
+        while not self.stop_event.is_set():
+            if self.cap is None:
+                break
+
+            ok, frame = self.cap.read()
+            if not ok or frame is None:
+                time.sleep(0.02)
+                continue
+
+            with self.frame_lock:
+                self.latest_frame = frame.copy()
+
+    def get_frame(self):
+        with self.frame_lock:
+            if self.latest_frame is None:
+                return None
+            return self.latest_frame.copy()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        self.thread = None
+
+
+class DualCsi360Capture:
+    def __init__(self):
+        self.cam0 = CsiCameraStream(
+            sensor_id=args.view_360_cam0_sensor_id,
+            width=args.view_360_width,
+            height=args.view_360_height,
+            fps=args.view_360_fps,
+            flip_method=args.view_360_cam0_flip_method,
+            label="CAM0",
+        )
+        self.cam1 = CsiCameraStream(
+            sensor_id=args.view_360_cam1_sensor_id,
+            width=args.view_360_width,
+            height=args.view_360_height,
+            fps=args.view_360_fps,
+            flip_method=args.view_360_cam1_flip_method,
+            label="CAM1",
+        )
+        self.enabled = False
+
+    def start(self):
+        cam0_ok = self.cam0.start()
+        cam1_ok = self.cam1.start()
+        self.enabled = cam0_ok and cam1_ok
+        if not self.enabled:
+            print("[360] Disabling 360 capture because one or more CSI cameras failed to start.")
+            self.stop()
+        return self.enabled
+
+    def get_frames(self):
+        if not self.enabled:
+            return None, None
+        return self.cam0.get_frame(), self.cam1.get_frame()
+
+    def stop(self):
+        self.cam0.stop()
+        self.cam1.stop()
+        self.enabled = False
 
 # ================= PCA9685 (SMBus) =================
 class PCA9685:
@@ -192,6 +326,17 @@ if steering_limit_input:
 else:
     print("Using 100% steering.")
 
+# ================= OPTIONAL 360 CSI CAMERAS =================
+view_360_capture = None
+VIEW_360_ENABLED = False
+view_360_waiting_logged = False
+
+if args.view_360 and CAMERA_ENABLED:
+    view_360_capture = DualCsi360Capture()
+    VIEW_360_ENABLED = view_360_capture.start()
+elif args.view_360:
+    print("[360] 360 capture requested but CAMERA_ENABLED=False, so CAM0/CAM1 recording is disabled.")
+
 # ================= MULTI-SESSION SETUP =================
 BASE_RUN_DIR = "runs_rgb_depth"
 os.makedirs(BASE_RUN_DIR, exist_ok=True)
@@ -201,19 +346,34 @@ def create_new_session():
     os.makedirs(session_dir, exist_ok=True)
     return session_dir
 
+def get_dataset_header():
+    if args.record_mode == 'all' and args.camera == 'realsense':
+        header = ["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"]
+    else:
+        header = ["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"]
+
+    if VIEW_360_ENABLED:
+        header.extend(["cam0_path", "cam1_path"])
+
+    return header
+
 RUN_DIR = create_new_session()
 csv_path = os.path.join(RUN_DIR, "dataset.csv")
 csv_file = open(csv_path, "w", newline="")
 writer = csv.writer(csv_file)
-if args.record_mode == 'all' and args.camera == 'realsense':
-    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
-else:
-    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+writer.writerow(get_dataset_header())
 
 frame_idx = 0
 
 # ================= WRITER THREAD =================
 write_queue = queue.Queue(maxsize=100)
+
+def save_resized_frame(image, path):
+    if image is None or path is None:
+        return
+
+    image_small = cv2.resize(image, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+    cv2.imwrite(path, image_small)
 
 def writer_worker():
     global csv_file, writer
@@ -224,29 +384,31 @@ def writer_worker():
             continue
             
         if item is None:
+            write_queue.task_done()
             break
             
         cmd = item[0]
         
         if cmd == "FRAME":
-            _, rgb, row_data, rgb_path = item
+            _, rgb, row_data, rgb_path, extra_frames = item
             try:
-                # Resize here to offload 'recording_worker'
-                rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
-                cv2.imwrite(rgb_path, rgb_small)
+                save_resized_frame(rgb, rgb_path)
+                for extra_path, extra_image in extra_frames:
+                    save_resized_frame(extra_image, extra_path)
                 writer.writerow(row_data)
                 csv_file.flush()
             except Exception as e:
                 print(f"Write error: {e}")
         elif cmd == "FRAME_ALL":
-            _, rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path = item
+            _, rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path, extra_frames = item
             try:
-                rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
-                cv2.imwrite(rgb_path, rgb_small)
+                save_resized_frame(rgb, rgb_path)
                 if ir_image is not None and ir_path is not None:
                     cv2.imwrite(ir_path, ir_image)
                 if depth_map is not None and depth_path is not None:
                     cv2.imwrite(depth_path, depth_map)
+                for extra_path, extra_image in extra_frames:
+                    save_resized_frame(extra_image, extra_path)
                 writer.writerow(row_data)
                 csv_file.flush()
             except Exception as e:
@@ -301,6 +463,26 @@ def get_rgb_and_front_depth():
         return None, None
     return rgb, float(center_depth)
 
+def get_view_360_capture(frame_number):
+    global view_360_waiting_logged
+
+    if not VIEW_360_ENABLED or view_360_capture is None:
+        return [], []
+
+    cam0_frame, cam1_frame = view_360_capture.get_frames()
+    if cam0_frame is None or cam1_frame is None:
+        if not view_360_waiting_logged:
+            print("\n[360] Waiting for CAM0/CAM1 frames before saving synchronized 360 data...")
+            view_360_waiting_logged = True
+        return None, None
+
+    view_360_waiting_logged = False
+    cam0_path = os.path.join(RUN_DIR, f"cam0_{frame_number:05d}.png")
+    cam1_path = os.path.join(RUN_DIR, f"cam1_{frame_number:05d}.png")
+    extra_frames = [(cam0_path, cam0_frame), (cam1_path, cam1_frame)]
+    extra_paths = [cam0_path, cam1_path]
+    return extra_frames, extra_paths
+
 def delete_last_n(n):
     global frame_idx
     if frame_idx == 0:
@@ -312,13 +494,13 @@ def delete_last_n(n):
     print(f"\nRequested delete of last {n} frames -> index reverted to {frame_idx}")
 
 def delete_current_session():
-    global frame_idx, RUN_DIR, csv_path, csv_file, writer
+    global frame_idx, RUN_DIR, csv_path, csv_file, writer, recording, view_360_waiting_logged
     confirm = input(f"\nDelete current session '{RUN_DIR}'? [y/N]: ").strip().lower()
     if confirm == 'y':
-        # Clear queue
-        with write_queue.mutex:
-            write_queue.queue.clear()
-            
+        recording = False
+        print("\nDraining pending writes before deleting current session...")
+        write_queue.join()
+
         csv_file.close()
         for fname in os.listdir(RUN_DIR):
             os.remove(os.path.join(RUN_DIR, fname))
@@ -328,10 +510,8 @@ def delete_current_session():
         csv_path = os.path.join(RUN_DIR, "dataset.csv")
         csv_file = open(csv_path, "w", newline="")
         writer = csv.writer(csv_file)
-        if args.record_mode == 'all' and args.camera == 'realsense':
-            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
-        else:
-            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+        writer.writerow(get_dataset_header())
+        view_360_waiting_logged = False
         frame_idx = 0
 
 
@@ -422,37 +602,47 @@ def recording_worker():
                         if args.record_mode == 'all' and args.camera == 'realsense':
                             rgb, depth_front, ir_image, depth_map = get_rgb_and_front_depth()
                             if rgb is not None:
-                                last_steer_rec = s_us
-                                last_throttle_rec = t_us
+                                extra_frames, extra_paths = get_view_360_capture(frame_idx)
+                                if extra_frames is None:
+                                    time.sleep(0.005)
+                                    continue
                                 rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
                                 ir_path = os.path.join(RUN_DIR, f"ir_{frame_idx:05d}.png") if ir_image is not None else None
                                 depth_path = os.path.join(RUN_DIR, f"depth_{frame_idx:05d}.png") if depth_map is not None else None
                                 row_data = [time.time(), s_us, t_us,
                                             pwm_to_norm(s_us), pwm_to_norm(t_us),
                                             depth_front, rgb_path, ir_path, depth_path]
+                                row_data.extend(extra_paths)
                                 if not write_queue.full():
-                                    write_queue.put(("FRAME_ALL", rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path))
+                                    write_queue.put(("FRAME_ALL", rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path, extra_frames))
+                                    last_steer_rec = s_us
+                                    last_throttle_rec = t_us
                                     frame_idx += 1
+                                    last_save_time = now
                                     if frame_idx % 2 == 0:
                                         print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
                                               f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
-                                last_save_time = now
                         else:
                             rgb, depth_front = get_rgb_and_front_depth()
                             if rgb is not None:
-                                last_steer_rec = s_us
-                                last_throttle_rec = t_us
+                                extra_frames, extra_paths = get_view_360_capture(frame_idx)
+                                if extra_frames is None:
+                                    time.sleep(0.005)
+                                    continue
                                 rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
                                 row_data = [time.time(), s_us, t_us,
                                             pwm_to_norm(s_us), pwm_to_norm(t_us),
                                             depth_front, rgb_path]
+                                row_data.extend(extra_paths)
                                 if not write_queue.full():
-                                    write_queue.put(("FRAME", rgb, row_data, rgb_path))
+                                    write_queue.put(("FRAME", rgb, row_data, rgb_path, extra_frames))
+                                    last_steer_rec = s_us
+                                    last_throttle_rec = t_us
                                     frame_idx += 1
+                                    last_save_time = now
                                     if frame_idx % 2 == 0:
                                         print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
                                               f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
-                                last_save_time = now
             
             # Small sleep to prevent CPU hogging in this thread
             time.sleep(0.005)
@@ -489,6 +679,13 @@ print("  ENTER -> Start/Pause recording")
 print(f"  BACKSPACE -> Delete last {cfg.DELETE_N_FRAMES} frames")
 print("  DEL/d -> Delete current session")
 print("  Ctrl+C -> Quit")
+if VIEW_360_ENABLED:
+    print(
+        f"  360 View -> ENABLED (CAM0 sensor-id={args.view_360_cam0_sensor_id}, "
+        f"CAM1 sensor-id={args.view_360_cam1_sensor_id})"
+    )
+elif args.view_360:
+    print("  360 View -> REQUESTED but unavailable, continuing without CAM0/CAM1 recording")
 print("\n>>> RECORDING will start after pressing ENTER\n")
 
 # ================= UTIL: deadzone =================
@@ -589,14 +786,16 @@ except KeyboardInterrupt:
     print("\nStopping...")
 
 finally:
-    # Wait for queue to drain?
     print("\nDraining write queue...")
-    write_queue.put(None) # Signal exit
+    write_queue.put(None)
     write_queue.join()
-    
+
+    csv_file.close()
     neutralize()
     if not USE_NETWORK_CONTROLLER:
         pygame.quit()
+    if view_360_capture is not None:
+        view_360_capture.stop()
     if CAMERA_ENABLED:
         try:
             realsense_full.stop_pipeline()
