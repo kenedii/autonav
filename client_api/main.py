@@ -253,9 +253,12 @@ async def video_stream_endpoint(websocket: WebSocket):
         import cv2 as _cv2
         cap = None
         try:
-            # Use camera index 0; if the car has a configured camera, prefer it
-            cam_cfg = (car.config.get("cameras") or [{}])
-            cam_index = cam_cfg[0].get("index", 0) if cam_cfg else 0
+            req_index = auth_data.get("camera_index")
+            if req_index is not None:
+                cam_index = int(req_index)
+            else:
+                cam_cfg = (car.config.get("cameras") or [{}])
+                cam_index = cam_cfg[0].get("index", 0) if cam_cfg else 0
             cap = _cv2.VideoCapture(cam_index)
             if not cap.isOpened():
                 await websocket.send_text(json.dumps({"error": "camera_unavailable"}))
