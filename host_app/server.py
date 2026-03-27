@@ -240,7 +240,7 @@ async def websocket_endpoint(websocket: WebSocket, client_name: str):
 
 # ── Video proxy WebSocket ────────────────────────────────────────────────────
 @app.websocket("/ws/video/{car_id}")
-async def video_proxy_endpoint(websocket: WebSocket, car_id: str, camera_index: int = None):
+async def video_proxy_endpoint(websocket: WebSocket, car_id: str, camera_index: int = None, fps: int = 5):
     """
     Browser connects here; we open an outbound WS to the car's /ws/video
     endpoint, authenticate, and relay encrypted JPEG frames to the browser
@@ -265,7 +265,7 @@ async def video_proxy_endpoint(websocket: WebSocket, car_id: str, camera_index: 
     try:
         async with _ws_client.connect(car_ws_uri) as car_ws:
             # Send auth to the car
-            auth_msg = {"auth": password}
+            auth_msg = {"auth": password, "fps": fps}
             if camera_index is not None:
                 auth_msg["camera_index"] = camera_index
             await car_ws.send(json.dumps(auth_msg))

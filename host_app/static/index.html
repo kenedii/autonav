@@ -154,10 +154,21 @@
                     <!-- Video Feed Tab -->
                     <div id="client-tab-video" class="client-tab-pane" style="display:none; padding:1rem;">
                         <h3>Live Camera Feed</h3>
+                        <p style="color:#d9534f; font-size:0.85em; margin-bottom:0.75rem; font-weight:bold;">
+                            Note: Accessing the video feed at high FPS may severely impact the performance of other tasks such as navigation and model inference.
+                        </p>
                         <div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem;">
                             <span id="video-status" style="color:#888; font-size:0.9em;">Stopped</span>
                             <select id="camera-select" style="padding:4px; border-radius:4px; max-width: 150px;">
                                 <option value="0">Camera 0</option>
+                            </select>
+                            <label for="fps-select" style="font-size:0.9em; font-weight:bold;">FPS:</label>
+                            <select id="fps-select" style="padding:4px; border-radius:4px;">
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="5" selected>5</option>
+                                <option value="10">10</option>
+                                <option value="15">15</option>
                             </select>
                             <button class="btn-success" onclick="startVideoStream()">▶ Start</button>
                             <button class="btn-danger-outline" onclick="stopVideoStream()">■ Stop</button>

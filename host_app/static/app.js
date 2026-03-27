@@ -745,7 +745,13 @@ function startVideoStream() {
         camIdx = camSelect.value;
     }
     
-    const wsUrl = `${wsProto}://${location.host}/ws/video/${encodedId}?camera_index=${camIdx}`;
+    let fps = "5";
+    const fpsSelect = document.getElementById('fps-select');
+    if (fpsSelect && fpsSelect.value) {
+        fps = fpsSelect.value;
+    }
+    
+    const wsUrl = `${wsProto}://${location.host}/ws/video/${encodedId}?camera_index=${camIdx}&fps=${fps}`;
 
     videoSocket = new WebSocket(wsUrl);
     videoSocket.binaryType = 'arraybuffer';
