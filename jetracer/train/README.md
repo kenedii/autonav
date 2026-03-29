@@ -22,7 +22,8 @@ The data recording scripts (`record_data.py`, `record_data2.py`, `record_data3.p
 - `--view_360`: Also record two Jetson CSI cameras (CAM0/CAM1) and append `cam0_path` / `cam1_path` to each `dataset.csv` row.
 - `--view_360_cam0_sensor_id`, `--view_360_cam1_sensor_id`: Select the Jetson CSI `sensor-id` values for the 360 cameras.
 - `--view_360_width`, `--view_360_height`, `--view_360_fps`: Configure the CSI capture resolution and FPS.
-- `--view_360_cam0_flip_method`, `--view_360_cam1_flip_method`: Set Jetson `nvvidconv` flip methods per camera when mounting orientation needs adjustment.
+- `--view_360_save_width`, `--view_360_save_height`: Configure the saved PNG size for the 360 cameras. Defaults are `320x240`.
+- `--view_360_cam0_flip_method`, `--view_360_cam1_flip_method`: Set Jetson `nvvidconv` flip methods per camera when mounting orientation needs adjustment. Defaults are `2` so the 360 cameras are rotated 180 degrees.
 
 **Examples:**
 

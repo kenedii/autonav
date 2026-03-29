@@ -26,6 +26,16 @@ import select
 import argparse
 import queue
 
+try:
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    GST_AVAILABLE = True
+except Exception:
+    Gst = None
+    GST_AVAILABLE = False
+
 # ================= ARGS =================
 parser = argparse.ArgumentParser()
 parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type")
@@ -39,8 +49,10 @@ parser.add_argument('--view_360_cam1_sensor_id', type=int, default=1, help='Jets
 parser.add_argument('--view_360_width', type=int, default=640, help='Capture width for the 360 cameras')
 parser.add_argument('--view_360_height', type=int, default=480, help='Capture height for the 360 cameras')
 parser.add_argument('--view_360_fps', type=int, default=15, help='Capture FPS for the 360 cameras')
-parser.add_argument('--view_360_cam0_flip_method', type=int, default=0, help='nvvidconv flip-method for CAM0 (0-7)')
-parser.add_argument('--view_360_cam1_flip_method', type=int, default=0, help='nvvidconv flip-method for CAM1 (0-7)')
+parser.add_argument('--view_360_save_width', type=int, default=320, help='Saved width for the 360 camera images')
+parser.add_argument('--view_360_save_height', type=int, default=240, help='Saved height for the 360 camera images')
+parser.add_argument('--view_360_cam0_flip_method', type=int, default=2, help='nvvidconv flip-method for CAM0 (0-7)')
+parser.add_argument('--view_360_cam1_flip_method', type=int, default=2, help='nvvidconv flip-method for CAM1 (0-7)')
 args = parser.parse_args()
 
 if args.camera in ["opencv", "other"]:
@@ -106,13 +118,23 @@ class CsiCameraStream:
         self.flip_method = flip_method
         self.label = label
         self.cap = None
+        self.pipeline = None
+        self.appsink = None
+        self.backend = None
         self.thread = None
         self.stop_event = threading.Event()
         self.frame_lock = threading.Lock()
         self.latest_frame = None
 
     @staticmethod
-    def build_pipeline(sensor_id, width, height, fps, flip_method):
+    def build_pipeline(sensor_id, width, height, fps, flip_method, appsink_name=None):
+        appsink = "appsink drop=true max-buffers=1 sync=false"
+        if appsink_name is not None:
+            appsink = (
+                f"appsink name={appsink_name} emit-signals=false "
+                "drop=true max-buffers=1 sync=false"
+            )
+
         return (
             f"nvarguscamerasrc sensor-id={sensor_id} ! "
             "video/x-raw(memory:NVMM), "
@@ -122,13 +144,68 @@ class CsiCameraStream:
             f"video/x-raw, width=(int){width}, height=(int){height}, format=(string)BGRx ! "
             "videoconvert ! "
             "video/x-raw, format=(string)BGR ! "
-            "appsink drop=true max-buffers=1 sync=false"
+            f"{appsink}"
         )
 
     def start(self):
-        if self.cap is not None:
+        if self.cap is not None or self.pipeline is not None:
             return True
 
+        self.stop_event.clear()
+        started = False
+
+        if GST_AVAILABLE:
+            started = self._start_native_gstreamer()
+
+        if not started:
+            started = self._start_opencv_gstreamer()
+
+        if not started:
+            print(f"[360] Failed to open {self.label} on sensor-id={self.sensor_id}")
+            return False
+
+        self.thread = threading.Thread(target=self._reader, daemon=True)
+        self.thread.start()
+        print(
+            f"[360] {self.label} started on sensor-id={self.sensor_id} using {self.backend} "
+            f"({self.width}x{self.height}@{self.fps}, flip={self.flip_method})"
+        )
+        return True
+
+    def _start_native_gstreamer(self):
+        try:
+            pipeline_desc = self.build_pipeline(
+                self.sensor_id,
+                self.width,
+                self.height,
+                self.fps,
+                self.flip_method,
+                appsink_name="capture_sink",
+            )
+            self.pipeline = Gst.parse_launch(pipeline_desc)
+            self.appsink = self.pipeline.get_by_name("capture_sink")
+            if self.appsink is None:
+                raise RuntimeError("appsink not found in GStreamer pipeline")
+
+            state_ret = self.pipeline.set_state(Gst.State.PLAYING)
+            if state_ret == Gst.StateChangeReturn.FAILURE:
+                raise RuntimeError("pipeline failed to enter PLAYING state")
+
+            self.backend = "python-gstreamer"
+            return True
+        except Exception as e:
+            print(f"[360] {self.label} native GStreamer open failed: {e}")
+            if self.pipeline is not None:
+                try:
+                    self.pipeline.set_state(Gst.State.NULL)
+                except Exception:
+                    pass
+            self.pipeline = None
+            self.appsink = None
+            self.backend = None
+            return False
+
+    def _start_opencv_gstreamer(self):
         pipeline = self.build_pipeline(
             self.sensor_id,
             self.width,
@@ -138,27 +215,73 @@ class CsiCameraStream:
         )
         self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
         if not self.cap.isOpened():
-            print(f"[360] Failed to open {self.label} on sensor-id={self.sensor_id}")
             self.cap.release()
             self.cap = None
             return False
 
-        self.stop_event.clear()
-        self.thread = threading.Thread(target=self._reader, daemon=True)
-        self.thread.start()
-        print(
-            f"[360] {self.label} started on sensor-id={self.sensor_id} "
-            f"({self.width}x{self.height}@{self.fps}, flip={self.flip_method})"
-        )
+        self.backend = "opencv-gstreamer"
         return True
+
+    def _pull_gstreamer_sample(self):
+        if self.appsink is None:
+            return None
+
+        sample = self.appsink.emit("try-pull-sample", 200000000)
+        if sample is None:
+            return None
+
+        return self._sample_to_bgr(sample)
+
+    @staticmethod
+    def _sample_to_bgr(sample):
+        caps = sample.get_caps()
+        if caps is None or caps.get_size() == 0:
+            return None
+
+        structure = caps.get_structure(0)
+        width = structure.get_value("width")
+        height = structure.get_value("height")
+        pixel_format = structure.get_value("format")
+
+        buffer = sample.get_buffer()
+        if buffer is None:
+            return None
+
+        ok, map_info = buffer.map(Gst.MapFlags.READ)
+        if not ok:
+            return None
+
+        try:
+            channels = 3 if pixel_format == "BGR" else 4 if pixel_format == "BGRx" else None
+            if channels is None:
+                return None
+
+            data = np.frombuffer(map_info.data, dtype=np.uint8)
+            row_stride = data.size // height if height else 0
+            if row_stride < width * channels:
+                return None
+
+            frame = data.reshape((height, row_stride))
+            frame = frame[:, : width * channels]
+            frame = frame.reshape((height, width, channels))
+            if channels == 4:
+                frame = frame[:, :, :3]
+            return frame.copy()
+        finally:
+            buffer.unmap(map_info)
 
     def _reader(self):
         while not self.stop_event.is_set():
-            if self.cap is None:
-                break
+            if self.backend == "python-gstreamer":
+                frame = self._pull_gstreamer_sample()
+            else:
+                if self.cap is None:
+                    break
+                ok, frame = self.cap.read()
+                if not ok:
+                    frame = None
 
-            ok, frame = self.cap.read()
-            if not ok or frame is None:
+            if frame is None:
                 time.sleep(0.02)
                 continue
 
@@ -178,6 +301,14 @@ class CsiCameraStream:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
+        if self.pipeline is not None:
+            try:
+                self.pipeline.set_state(Gst.State.NULL)
+            except Exception:
+                pass
+            self.pipeline = None
+        self.appsink = None
+        self.backend = None
         self.thread = None
 
 
@@ -368,11 +499,11 @@ frame_idx = 0
 # ================= WRITER THREAD =================
 write_queue = queue.Queue(maxsize=100)
 
-def save_resized_frame(image, path):
+def save_resized_frame(image, path, width, height):
     if image is None or path is None:
         return
 
-    image_small = cv2.resize(image, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+    image_small = cv2.resize(image, (width, height))
     cv2.imwrite(path, image_small)
 
 def writer_worker():
@@ -392,9 +523,9 @@ def writer_worker():
         if cmd == "FRAME":
             _, rgb, row_data, rgb_path, extra_frames = item
             try:
-                save_resized_frame(rgb, rgb_path)
+                save_resized_frame(rgb, rgb_path, cfg.IMG_WIDTH, cfg.IMG_HEIGHT)
                 for extra_path, extra_image in extra_frames:
-                    save_resized_frame(extra_image, extra_path)
+                    save_resized_frame(extra_image, extra_path, args.view_360_save_width, args.view_360_save_height)
                 writer.writerow(row_data)
                 csv_file.flush()
             except Exception as e:
@@ -402,13 +533,13 @@ def writer_worker():
         elif cmd == "FRAME_ALL":
             _, rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path, extra_frames = item
             try:
-                save_resized_frame(rgb, rgb_path)
+                save_resized_frame(rgb, rgb_path, cfg.IMG_WIDTH, cfg.IMG_HEIGHT)
                 if ir_image is not None and ir_path is not None:
                     cv2.imwrite(ir_path, ir_image)
                 if depth_map is not None and depth_path is not None:
                     cv2.imwrite(depth_path, depth_map)
                 for extra_path, extra_image in extra_frames:
-                    save_resized_frame(extra_image, extra_path)
+                    save_resized_frame(extra_image, extra_path, args.view_360_save_width, args.view_360_save_height)
                 writer.writerow(row_data)
                 csv_file.flush()
             except Exception as e:
@@ -682,7 +813,9 @@ print("  Ctrl+C -> Quit")
 if VIEW_360_ENABLED:
     print(
         f"  360 View -> ENABLED (CAM0 sensor-id={args.view_360_cam0_sensor_id}, "
-        f"CAM1 sensor-id={args.view_360_cam1_sensor_id})"
+        f"CAM1 sensor-id={args.view_360_cam1_sensor_id}, "
+        f"save={args.view_360_save_width}x{args.view_360_save_height}, "
+        f"flip={args.view_360_cam0_flip_method}/{args.view_360_cam1_flip_method})"
     )
 elif args.view_360:
     print("  360 View -> REQUESTED but unavailable, continuing without CAM0/CAM1 recording")
