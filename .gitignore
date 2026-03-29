@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local training outputs and copied recordings
+jetracer/train/runs_rgb_depth/
+
+# Local virtual environments
+.venv/
+venv/

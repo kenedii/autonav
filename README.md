@@ -38,6 +38,12 @@ PCA9685 servo driver to steer the car.
 - Streamlit demo UI
 - Dockerfile for Streamlit deployment
 
+## Development Workflow
+
+Use Git as the source of truth for source changes and treat the Jetson as a
+deployment target that pulls tested code from Git. The workflow reference lives
+in [docs/git_workflow.md](docs/git_workflow.md).
+
 ## 1. Setup
 
 ### 1.1 Jetson Base Setup
