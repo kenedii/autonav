@@ -70,6 +70,7 @@
                             <span class="status-pill" id="detail-status">Online</span>
                             <button class="btn-danger-outline" onclick="deleteCar()">Remove</button>
                         </div>
+                        <div class="inline-status" id="operator-status">Ready.</div>
                         
                         <div class="client-tabs-nav">
                             <button class="client-tab-btn active" onclick="openClientTab('overview')">Overview</button>
@@ -77,64 +78,90 @@
                         </div>
 
                         <div id="client-tab-overview" class="client-tab-pane active">
-                            <div class="detail-info">
-                                <p><strong>IP Address:</strong> <span id="detail-ip"></span></p>
-                                <p><strong>Location:</strong> <span id="detail-geo"></span></p>
-                                <p><strong>Activity:</strong> <span id="detail-activity">Idle</span></p>
-                                <p><strong>FPS:</strong> <span id="detail-fps">0</span></p>
-                                <div id="imu-info" style="margin-top:5px; font-size:0.9em; color:#bbb;">
-                                    <p><strong>IMU Accel:</strong> <span id="imu-accel">N/A</span></p>
-                                    <p><strong>IMU Gyro:</strong> <span id="imu-gyro">N/A</span></p>
+                            <div class="operator-layout">
+                                <div class="operator-main">
+                                    <div class="preview-panel control-group">
+                                        <div class="panel-heading">
+                                            <h3>Live Preview</h3>
+                                            <div class="badge-row">
+                                                <span class="status-badge" id="mission-state-badge">IDLE</span>
+                                                <span class="status-badge neutral" id="stop-reason-badge">No stop reason</span>
+                                            </div>
+                                        </div>
+                                        <div class="preview-frame">
+                                            <img id="live-preview" alt="Live preview" />
+                                            <div class="preview-placeholder" id="preview-placeholder">Preview will appear when the car is selected.</div>
+                                        </div>
+                                        <div class="preview-meta">
+                                            <div><strong>Mission:</strong> <span id="mission-route">expo_route</span></div>
+                                            <div><strong>Vehicle:</strong> <span id="detail-activity">Idle</span></div>
+                                            <div><strong>FPS:</strong> <span id="detail-fps">0</span></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="mission-grid">
+                                        <div class="control-group">
+                                            <h3>Mission State</h3>
+                                            <div class="detail-info">
+                                                <p><strong>IP Address:</strong> <span id="detail-ip"></span></p>
+                                                <p><strong>Location:</strong> <span id="detail-geo"></span></p>
+                                                <p><strong>Tag Detector:</strong> <span id="mission-tag-status">Unknown</span></p>
+                                                <p><strong>Obstacle Distance:</strong> <span id="obstacle-distance">N/A</span></p>
+                                                <p><strong>Last Tag:</strong> <span id="last-tag">N/A</span></p>
+                                                <p><strong>Last Action:</strong> <span id="last-action">N/A</span></p>
+                                                <div id="imu-info" class="metric-stack">
+                                                    <p><strong>IMU Accel:</strong> <span id="imu-accel">N/A</span></p>
+                                                    <p><strong>IMU Gyro:</strong> <span id="imu-gyro">N/A</span></p>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div class="control-group">
+                                            <h3>Route Progress</h3>
+                                            <div class="route-grid">
+                                                <div><span class="route-label">Start seen</span><span id="route-start-seen" class="route-value">No</span></div>
+                                                <div><span class="route-label">Checkpoint seen</span><span id="route-checkpoint-seen" class="route-value">No</span></div>
+                                                <div><span class="route-label">Goal seen</span><span id="route-goal-seen" class="route-value">No</span></div>
+                                                <div><span class="route-label">Expected next tag</span><span id="route-expected-next" class="route-value">20</span></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="operator-sidebar">
+                                    <div class="control-group">
+                                        <h3>Live Controls</h3>
+                                        <div class="btn-row">
+                                            <button class="btn-success" onclick="controlAction('start')">START</button>
+                                            <button class="btn-warning" onclick="controlAction('pause')">PAUSE</button>
+                                            <button class="btn-danger" onclick="controlAction('stop')">STOP</button>
+                                            <button class="btn-primary" onclick="controlAction('resume')">RESUME</button>
+                                        </div>
+                                    </div>
+
+                                    <div class="control-group">
+                                        <h3>System Configuration</h3>
+                                        <button class="btn-secondary" onclick="openConfigModal()">Edit Configuration</button>
+                                    </div>
+
+                                    <div class="control-group">
+                                        <h3>Live Detections</h3>
+                                        <ul id="detection-list" class="data-list">
+                                            <li>No objects detected</li>
+                                        </ul>
+                                    </div>
+
+                                    <div class="control-group">
+                                        <h3>Mission Logs</h3>
+                                        <div class="log-panel" id="mission-log-panel">
+                                            <ul id="mission-log-list" class="log-list">
+                                                <li>No logs yet.</li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                    </div>
                                 </div>
                             </div>
-    
-                            <div class="control-group">
-                                <h3>Live Controls</h3>
-                                <div class="btn-row">
-                                    <button class="btn-success" onclick="controlAction('start')">START</button>
-                                    <button class="btn-warning" onclick="controlAction('pause')">PAUSE</button>
-                                    <button class="btn-danger" onclick="controlAction('stop')">STOP</button>
-                                    <button class="btn-primary" onclick="controlAction('resume')">RESUME</button>
-                                </div>
-                            </div>
-
-                            <div class="control-group">
-                                <h3>Tuning</h3>
-                                <div class="form-row">
-                                    <label>Mode:</label>
-                                    <select id="tune-mode" onchange="updateSettings()">
-                                        <option value="fixed">Fixed Throttle</option>
-                                    <option value="ai">AI Control</option>
-                                </select>
-                            </div>
-                            <div class="form-row">
-                                <label>Throttle:</label>
-                                <input type="number" id="tune-throttle" step="0.01" value="0.22" onchange="updateSettings()">
-                            </div>
-                        </div>
-                        
-                        <div class="control-group">
-                            <h3>System Configuration</h3>
-                            <button class="btn-secondary" onclick="openConfigModal()">Edit Configuration</button>
-                        </div>
-
-                        <div class="control-group">
-                            <h3>Live Detections</h3>
-                            <ul id="detection-list">
-                                <li>No objects detected</li>
-                            </ul>
-                        </div>
-
-                        <!-- New Panel for SLAM / Map -->
-                        <div class="control-group">
-                            <h3>Map / SLAM</h3>
-                            <canvas id="slam-map" width="400" height="300" style="border:1px solid #333; background:#000;"></canvas>
-                            <div class="slam-controls">
-                                <p>Click on map to set destination</p>
-                                <button class="btn-danger-outline" onclick="cancelNavigation()">Cancel Nav</button>
-                                <div id="slam-coords">X: 0.0 Y: 0.0 &theta;: 0.0</div>
-                            </div>
-                        </div>
                     </div> <!-- End of client-tab-overview -->
 
                     <div id="client-tab-specs" class="client-tab-pane" style="display:none; padding:1rem;">

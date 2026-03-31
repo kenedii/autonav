@@ -293,9 +293,12 @@ async def video_proxy_endpoint(websocket: WebSocket, car_id: str):
             pass
 
 # --- Hybrid Proxy Helpers ---
-async def send_car_command(car_id: str, command: str, payload: dict = {}):
+async def send_car_command(car_id: str, command: str, payload: dict = None):
     if car_id not in db.cars: raise HTTPException(404, "Car not found")
     car = db.cars[car_id]
+    payload = dict(payload or {})
+    if command == "configure" and "password" not in payload:
+        payload["password"] = car.get("password", "changeme")
 
     if car.get("type") == "virtual":
         return {"status": "sent_via_virtual"}
@@ -323,8 +326,21 @@ async def send_car_command(car_id: str, command: str, payload: dict = {}):
 # --- Endpoints ---
 
 def _safe_car(record: dict) -> dict:
-    """Return a JSON-serialisable copy of a car record (strip non-serialisable fields)."""
-    return {k: v for k, v in record.items() if k != "fernet"}
+    """Return a JSON-serialisable copy of a car record with secrets redacted."""
+    return _redact_sensitive(record)
+
+
+def _redact_sensitive(value):
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            if key in ("fernet", "password"):
+                continue
+            redacted[key] = _redact_sensitive(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value
 
 @app.get("/api/cars")
 def get_cars():
@@ -420,7 +436,7 @@ def proxy_status(car_id: str):
     car = db.cars[car_id]
     
     if car.get("type") in ("virtual", "websocket"):
-        return car.get("details", {})
+        return _redact_sensitive(car.get("details", {}))
 
     url = f"http://{car['ip']}:{car['port']}/status"
     headers = {"X-Api-Key": car.get("password", "changeme")}
@@ -432,7 +448,7 @@ def proxy_status(car_id: str):
             is_running = data.get("running", False)
             car["status"] = "online" if is_running else "stopped"
             car["details"] = data
-            return data
+            return _redact_sensitive(data)
     except Exception as e:
         err_msg = str(e)
         print(f"Error reaching {url}: {err_msg}")

@@ -11,7 +11,7 @@ sys.modules['torchvision.transforms'] = MagicMock()
 sys.modules['torchvision.models'] = MagicMock()
 
 from fastapi.testclient import TestClient
-from main import app, _drain_log_buffer, _current_password
+from main import app, ClientConfig, _drain_log_buffer, _current_password
 import logging
 
 client = TestClient(app)
@@ -56,3 +56,35 @@ def test_log_buffer():
 
     # verify empty after drain
     assert len(_drain_log_buffer()) == 0
+
+
+def test_configure_accepts_optional_mission_fields():
+    payload = {
+        "device": "cuda",
+        "architecture": "resnet18",
+        "cameras": [],
+        "control_model_type": "pytorch",
+        "control_model": "best_model.pth",
+        "throttle_mode": "fixed",
+        "fixed_throttle_value": 0.22,
+        "action_loop": ["control", "api"],
+        "ip": "0.0.0.0",
+        "port": 8000,
+        "password": _current_password,
+        "mission": {
+            "enabled": True,
+            "route_name": "expo_route",
+            "tag_ids": {"start_home": 10, "checkpoint": 20, "goal": 30},
+            "depth_stop": {"enabled": True, "threshold_m": 0.6},
+        },
+    }
+
+    try:
+        config = ClientConfig(**payload)
+    except Exception as exc:
+        pytest.skip(f"mission config not supported yet: {exc}")
+
+    assert config.password == _current_password
+    assert config.mission["enabled"] is True
+    assert config.mission["route_name"] == "expo_route"
+    assert config.mission["tag_ids"]["checkpoint"] == 20

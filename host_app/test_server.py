@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from server import app, db
+from server import app, db, _safe_car
 
 client = TestClient(app)
 
@@ -30,6 +30,7 @@ def test_add_car():
     assert data["status"] == "added"
     assert "car" in data
     assert data["car"]["name"] == "TestCar1"
+    assert "password" not in data["car"]
 
 def test_get_cars():
     response = client.get("/api/cars")
@@ -37,6 +38,58 @@ def test_get_cars():
     data = response.json()
     assert isinstance(data, list)
     assert len(data) >= 1
+    for car in data:
+        assert "password" not in car
+
+
+def test_safe_car_redacts_passwords():
+    record = {
+        "id": "car-1",
+        "name": "Car 1",
+        "password": "top-secret",
+        "fernet": object(),
+        "details": {
+            "config": {
+                "password": "nested-secret",
+                "route_name": "expo_route",
+            }
+        },
+    }
+
+    safe = _safe_car(record)
+
+    assert "fernet" not in safe
+    assert "password" not in safe
+    assert safe["details"]["config"]["route_name"] == "expo_route"
+    assert "password" not in safe["details"]["config"]
+
+
+def test_car_log_since_filters_incrementally():
+    client_id = client.post("/api/test-client").json()["id"]
+    db.logs[client_id].clear()
+    db.logs[client_id].append({"timestamp": 100.0, "level": "INFO", "message": "old"})
+    db.logs[client_id].append({"timestamp": 200.0, "level": "INFO", "message": "new"})
+
+    logs_resp = client.get(f"/api/cars/{client_id}/logs?since=150.0")
+    assert logs_resp.status_code == 200
+    logs_data = logs_resp.json()
+    assert [entry["message"] for entry in logs_data["logs"]] == ["new"]
+
+
+def test_delete_car():
+    response = client.post("/api/cars", json={
+        "name": "DeleteMe",
+        "ip": "192.168.1.111",
+        "port": 8000,
+        "password": "pass"
+    })
+    car_id = response.json()["car"]["id"]
+
+    del_res = client.delete(f"/api/cars/{car_id}")
+    assert del_res.status_code == 200
+
+    missing = client.get("/api/cars")
+    assert all(car["id"] != car_id for car in missing.json())
 
 def test_delete_car_logs():
     # first setup a client

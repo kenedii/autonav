@@ -2,39 +2,204 @@
 let cars = [];
 let selectedCarId = null;
 let pollInterval = null;
+let logPollInterval = null;
+let pollIntervalMs = 2000;
+let statusChart = null;
+let videoSocket = null;
+let videoSocketGeneration = 0;
+let videoObjectUrl = null;
+let logCursorByCarId = {};
 
-// --- Tab Logic ---
+function getSelectedCar() {
+    if (!selectedCarId) return null;
+    return cars.find(function (car) { return car.id === selectedCarId; }) || null;
+}
+
+function encodeCarId(carId) {
+    return encodeURIComponent(carId || "");
+}
+
+function getHostWebSocketBase(path) {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return protocol + "//" + window.location.host + path;
+}
+
+function setInlineStatus(message, kind) {
+    const el = document.getElementById("operator-status");
+    if (!el) return;
+    el.textContent = message || "";
+    el.className = "inline-status";
+    if (kind) {
+        el.classList.add(kind);
+    }
+}
+
+function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+}
+
+function setBadge(id, value, kind) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = value;
+    el.className = "status-badge";
+    if (kind) {
+        el.classList.add(kind);
+    }
+}
+
+function formatBool(value) {
+    return value ? "Yes" : "No";
+}
+
+function formatDistanceMeters(value) {
+    if (value === null || value === undefined || value === "") return "N/A";
+    const num = Number(value);
+    if (!isFinite(num)) return "N/A";
+    return num.toFixed(2) + " m";
+}
+
+function formatVector(vec) {
+    if (!vec || !vec.length) return "N/A";
+    return "X:" + Number(vec[0]).toFixed(2) + " Y:" + Number(vec[1]).toFixed(2) + " Z:" + Number(vec[2]).toFixed(2);
+}
+
+function clearPreview() {
+    const img = document.getElementById("live-preview");
+    const placeholder = document.getElementById("preview-placeholder");
+    if (img) {
+        img.removeAttribute("src");
+    }
+    if (placeholder) {
+        placeholder.style.display = "flex";
+    }
+    if (videoObjectUrl) {
+        URL.revokeObjectURL(videoObjectUrl);
+        videoObjectUrl = null;
+    }
+}
+
+function closeVideoSocket() {
+    videoSocketGeneration += 1;
+    if (videoSocket) {
+        try {
+            videoSocket.onopen = null;
+            videoSocket.onmessage = null;
+            videoSocket.onerror = null;
+            videoSocket.onclose = null;
+            videoSocket.close();
+        } catch (err) {
+            console.warn("video close error", err);
+        }
+    }
+    videoSocket = null;
+    clearPreview();
+}
+
+function startLogPolling(carId) {
+    if (logPollInterval) {
+        clearInterval(logPollInterval);
+        logPollInterval = null;
+    }
+    const list = document.getElementById("mission-log-list");
+    if (list) {
+        list.innerHTML = "<li class=\"log-empty\">Loading logs...</li>";
+    }
+    logCursorByCarId[carId] = logCursorByCarId[carId] || 0;
+    pollCarLogs(carId);
+    logPollInterval = setInterval(function () {
+        pollCarLogs(carId);
+    }, 1500);
+}
+
+async function pollCarLogs(carId) {
+    if (!carId || selectedCarId !== carId) return;
+    const cursor = logCursorByCarId[carId] || 0;
+    try {
+        const res = await fetch("/api/cars/" + encodeCarId(carId) + "/logs?since=" + cursor);
+        if (!res.ok) return;
+        const data = await res.json();
+        const logs = data.logs || [];
+        if (!logs.length) {
+            if (cursor === 0) {
+                const list = document.getElementById("mission-log-list");
+                if (list && !list.children.length) {
+                    list.innerHTML = "<li class=\"log-empty\">No logs yet.</li>";
+                }
+            }
+            return;
+        }
+        appendLogs(logs);
+        let maxTs = cursor;
+        logs.forEach(function (entry) {
+            if (entry.timestamp > maxTs) {
+                maxTs = entry.timestamp;
+            }
+        });
+        logCursorByCarId[carId] = maxTs;
+    } catch (err) {
+        console.warn("log poll failed", err);
+    }
+}
+
+function appendLogs(logEntries) {
+    const list = document.getElementById("mission-log-list");
+    const panel = document.getElementById("mission-log-panel");
+    if (!list) return;
+    if (list.children.length === 1 && list.children[0].classList.contains("log-empty")) {
+        list.innerHTML = "";
+    }
+    logEntries.forEach(function (entry) {
+        const li = document.createElement("li");
+        li.className = "log-entry";
+        const ts = entry.timestamp ? new Date(entry.timestamp * 1000).toLocaleTimeString() : "--:--:--";
+        li.textContent = "[" + ts + "] " + (entry.level || "INFO") + " " + (entry.message || "");
+        list.appendChild(li);
+    });
+    while (list.children.length > 100) {
+        list.removeChild(list.firstChild);
+    }
+    if (panel) {
+        panel.scrollTop = panel.scrollHeight;
+    }
+}
+
 function openTab(tabName) {
-    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-    
-    document.getElementById(tabName).classList.add('active');
-    document.querySelector(`button[onclick="openTab('${tabName}')"]`).classList.add('active');
+    document.querySelectorAll(".tab-content").forEach(function (el) {
+        el.classList.remove("active");
+    });
+    document.querySelectorAll(".tab-btn").forEach(function (el) {
+        el.classList.remove("active");
+    });
+
+    document.getElementById(tabName).classList.add("active");
+    document.querySelector("button[onclick=\"openTab('" + tabName + "')\"]").classList.add("active");
 }
 
 function openClientTab(tabName) {
-    document.querySelectorAll('.client-tab-pane').forEach(el => {
-        el.style.display = 'none';
-        el.classList.remove('active');
+    document.querySelectorAll(".client-tab-pane").forEach(function (el) {
+        el.style.display = "none";
+        el.classList.remove("active");
     });
-    document.querySelectorAll('.client-tab-btn').forEach(el => el.classList.remove('active'));
-    
-    const content = document.getElementById(`client-tab-${tabName}`);
-    if(content) {
-        content.style.display = 'block';
-        content.classList.add('active');
+    document.querySelectorAll(".client-tab-btn").forEach(function (el) {
+        el.classList.remove("active");
+    });
+
+    const content = document.getElementById("client-tab-" + tabName);
+    if (content) {
+        content.style.display = "block";
+        content.classList.add("active");
     }
-    
-    // Find button to highlight
-    const btns = document.querySelectorAll('.client-tab-btn');
-    if (tabName === 'overview') btns[0].classList.add('active');
-    if (tabName === 'specs') btns[1].classList.add('active');
+
+    const btns = document.querySelectorAll(".client-tab-btn");
+    if (tabName === "overview" && btns[0]) btns[0].classList.add("active");
+    if (tabName === "specs" && btns[1]) btns[1].classList.add("active");
 }
 
-// --- Poll Data ---
 async function fetchCars() {
     try {
-        const res = await fetch('/api/cars');
+        const res = await fetch("/api/cars");
         const data = await res.json();
         cars = data;
         renderFleetList();
@@ -43,513 +208,439 @@ async function fetchCars() {
             updateDetailView();
         }
         updateCharts();
-    } catch (e) {
-        console.error("Failed to fetch cars", e);
+    } catch (err) {
+        console.error("Failed to fetch cars", err);
     }
 }
 
 function startPolling() {
     fetchCars();
-    pollInterval = setInterval(fetchCars, 2000); // 2s poll
+    if (pollInterval) clearInterval(pollInterval);
+    pollInterval = setInterval(fetchCars, pollIntervalMs);
 }
 
 async function fetchHostInfo() {
     try {
-        const res = await fetch('/api/host-info');
+        const res = await fetch("/api/host-info");
         const data = await res.json();
-        const el = document.getElementById('host-ip-info');
+        const el = document.getElementById("host-ip-info");
         if (el) el.innerText = "Server IP: " + data.ip + ":" + data.port;
-    } catch (e) {
-        console.error("Host info error:", e);
+    } catch (err) {
+        console.error("Host info error:", err);
     }
 }
 
-// --- Render Logic ---
 function renderFleetList() {
-    const list = document.getElementById('car-list');
-    list.innerHTML = '';
-    
-    cars.forEach(car => {
-        const li = document.createElement('li');
-        li.className = `car-item ${selectedCarId === car.id ? 'selected' : ''}`;
-        li.onclick = () => selectCar(car.id);
-        
-        let statusClass = 'dot-gray'; // unknown
-        if (car.status === 'online') statusClass = 'dot-green';
-        if (car.status === 'stopped') statusClass = 'dot-red';
-        if (car.status === 'offline') statusClass = 'dot-gray';
-        
-        li.innerHTML = `
-            <div>
-                <span class="status-dot ${statusClass}"></span>
-                <strong>${car.name}</strong>
-            </div>
-            <small style="color:#888;">${car.ip}</small>
-        `;
+    const list = document.getElementById("car-list");
+    if (!list) return;
+    list.innerHTML = "";
+
+    cars.forEach(function (car) {
+        const li = document.createElement("li");
+        li.className = "car-item" + (selectedCarId === car.id ? " selected" : "");
+        li.onclick = function () { selectCar(car.id); };
+
+        let statusClass = "dot-gray";
+        if (car.status === "online") statusClass = "dot-green";
+        if (car.status === "stopped") statusClass = "dot-red";
+        if (car.status === "offline") statusClass = "dot-gray";
+
+        li.innerHTML = [
+            "<div>",
+            "<span class=\"status-dot " + statusClass + "\"></span>",
+            "<strong>" + car.name + "</strong>",
+            "</div>",
+            "<small style=\"color:#888;\">" + car.ip + "</small>"
+        ].join("");
         list.appendChild(li);
     });
 }
 
-function selectCar(id) {
+async function selectCar(id) {
+    closeVideoSocket();
     selectedCarId = id;
-    renderFleetList(); // update active state
-    
-    document.querySelector('.empty-state').style.display = 'none';
-    document.getElementById('car-detail-content').style.display = 'block';
-    
-    // Trigger immediate refresh of this specific car's status to get live data
-    fetch(`/api/cars/${id}/status`); 
-    
+    renderFleetList();
+
+    const emptyState = document.querySelector(".empty-state");
+    const content = document.getElementById("car-detail-content");
+    if (emptyState) emptyState.style.display = "none";
+    if (content) content.style.display = "block";
+
+    await fetch("/api/cars/" + encodeCarId(id) + "/status");
+    await fetchCars();
     updateDetailView();
+    openVideoSocket(id);
+    startLogPolling(id);
+}
+
+function openVideoSocket(carId) {
+    if (!carId) return;
+    const generation = ++videoSocketGeneration;
+    const socket = new WebSocket(getHostWebSocketBase("/ws/video/" + encodeCarId(carId)));
+    socket.binaryType = "blob";
+    videoSocket = socket;
+
+    socket.onopen = function () {
+        if (generation !== videoSocketGeneration || selectedCarId !== carId) return;
+        setInlineStatus("Video connected.", "ok");
+    };
+
+    socket.onmessage = function (event) {
+        if (generation !== videoSocketGeneration || selectedCarId !== carId) return;
+        if (typeof event.data === "string") return;
+        const img = document.getElementById("live-preview");
+        const placeholder = document.getElementById("preview-placeholder");
+        if (!img) return;
+        if (videoObjectUrl) {
+            URL.revokeObjectURL(videoObjectUrl);
+        }
+        videoObjectUrl = URL.createObjectURL(event.data);
+        img.src = videoObjectUrl;
+        if (placeholder) {
+            placeholder.style.display = "none";
+        }
+    };
+
+    socket.onerror = function () {
+        if (generation !== videoSocketGeneration || selectedCarId !== carId) return;
+        setInlineStatus("Video unavailable.", "warn");
+    };
+
+    socket.onclose = function () {
+        if (generation !== videoSocketGeneration || selectedCarId !== carId) return;
+        setInlineStatus("Video disconnected.", "warn");
+        clearPreview();
+    };
+}
+
+function updateMissionView(mission) {
+    const state = mission || {};
+    const missionState = state.state || "IDLE";
+    const stopReason = state.stop_reason || "";
+    const detectorStatus = state.tag_detector_status || "Unknown";
+
+    setBadge("mission-state-badge", missionState, missionState === "FAULT_STOP" ? "danger" : missionState === "COMPLETE" ? "success" : missionState === "RUNNING" || missionState === "APPROACH_GOAL" ? "ok" : "neutral");
+    setBadge("stop-reason-badge", stopReason ? stopReason : "No stop reason", stopReason ? "warning" : "neutral");
+    setText("mission-route", state.route_name || "expo_route");
+    setText("mission-tag-status", detectorStatus);
+    setText("obstacle-distance", formatDistanceMeters(state.obstacle_distance_m));
+    setText("last-tag", state.last_tag_id === null || state.last_tag_id === undefined ? "N/A" : String(state.last_tag_id));
+    setText("route-start-seen", formatBool(state.start_tag_seen));
+    setText("route-checkpoint-seen", formatBool(state.checkpoint_seen));
+    setText("route-goal-seen", formatBool(state.goal_seen));
+    setText("route-expected-next", state.expected_next_tag === null || state.expected_next_tag === undefined ? "N/A" : String(state.expected_next_tag));
 }
 
 function updateDetailView() {
-    if (!selectedCarId) return;
-    const car = cars.find(c => c.id === selectedCarId);
+    const car = getSelectedCar();
     if (!car) return;
 
-    document.getElementById('detail-name').innerText = car.name;
-    document.getElementById('detail-status').innerText = car.status.toUpperCase();
-    document.getElementById('detail-ip').innerText = `${car.ip}:${car.port}`;
-    
-    // Geo
-    const geo = car.geo || {};
-    document.getElementById('detail-geo').innerText = 
-        geo.city ? `${geo.city}, ${geo.country}` : 'Unknown / Local';
+    document.getElementById("detail-name").innerText = car.name || "Car";
+    document.getElementById("detail-status").innerText = (car.status || "UNKNOWN").toUpperCase();
+    document.getElementById("detail-ip").innerText = (car.ip || "") + ":" + (car.port || "");
 
-    // Details from deep state
+    const geo = car.geo || {};
+    document.getElementById("detail-geo").innerText = geo.city ? (geo.city + ", " + geo.country) : "Unknown / Local";
+
     const d = car.details || {};
-    
     if (d.error) {
-        document.getElementById('detail-activity').innerHTML = `<span style="color:red">Error: ${d.error}</span>`;
+        document.getElementById("detail-activity").innerHTML = "<span style=\"color:#ff8a8a\">Error: " + d.error + "</span>";
     } else {
         const running = d.running ? "Running" : "Stopped";
-        document.getElementById('detail-activity').innerText = running + (d.paused ? " (Paused)" : "");
+        document.getElementById("detail-activity").innerText = running + (d.paused ? " (Paused)" : "");
     }
-    
-    const fps = d.state?.fps || 0;
-    document.getElementById('detail-fps').innerText = fps;
 
-    // IMU Data
-    const loc = d.state?.location || {};
+    const fps = d.state && d.state.fps ? d.state.fps : 0;
+    document.getElementById("detail-fps").innerText = String(fps);
+
+    const mission = d.state && d.state.mission ? d.state.mission : {};
+    updateMissionView(mission);
+
+    const lastAction = d.state && d.state.last_action ? d.state.last_action : null;
+    if (lastAction) {
+        const steer = lastAction.steer !== undefined ? Number(lastAction.steer).toFixed(2) : "n/a";
+        const throttle = lastAction.throttle !== undefined ? Number(lastAction.throttle).toFixed(2) : "n/a";
+        setText("last-action", "steer " + steer + ", throttle " + throttle);
+    } else {
+        setText("last-action", "N/A");
+    }
+
+    const loc = d.state && d.state.location ? d.state.location : {};
     const imu = loc.imu || {};
-    if (imu.accel) {
-        document.getElementById('imu-accel').innerText = 
-            `X:${imu.accel[0].toFixed(2)} Y:${imu.accel[1].toFixed(2)} Z:${imu.accel[2].toFixed(2)}`;
-    } else {
-        document.getElementById('imu-accel').innerText = "N/A";
-    }
-    if (imu.gyro) {
-        document.getElementById('imu-gyro').innerText = 
-            `X:${imu.gyro[0].toFixed(2)} Y:${imu.gyro[1].toFixed(2)} Z:${imu.gyro[2].toFixed(2)}`;
-    } else {
-        document.getElementById('imu-gyro').innerText = "N/A";
-    }
+    document.getElementById("imu-accel").innerText = imu.accel ? formatVector(imu.accel) : "N/A";
+    document.getElementById("imu-gyro").innerText = imu.gyro ? formatVector(imu.gyro) : "N/A";
 
-    // Current settings
-    // If we just loaded, we might want to sync UI with current throttle...
-    // But since backend doesn't always send settings back in basic status, we rely on user input.
-
-    // Detections
-    const detList = document.getElementById('detection-list');
-    detList.innerHTML = '';
-    const dets = d.state?.detections || [];
-    if (dets.length === 0) {
-        detList.innerHTML = '<li>No objects detected</li>';
-    } else {
-        dets.forEach(obj => {
-            const dist = obj.distance ? (obj.distance/1000).toFixed(2) + 'm' : 'N/A';
-            const li = document.createElement('li');
-            li.innerHTML = `Class: <strong>${obj.class}</strong> | Dist: <strong>${dist}</strong> | Conf: ${(obj.conf*100).toFixed(0)}%`;
-            detList.appendChild(li);
-        });
+    const detList = document.getElementById("detection-list");
+    if (detList) {
+        detList.innerHTML = "";
+        const dets = d.state && d.state.detections ? d.state.detections : [];
+        if (!dets.length) {
+            detList.innerHTML = "<li>No objects detected</li>";
+        } else {
+            dets.forEach(function (obj) {
+                const li = document.createElement("li");
+                const dist = obj.distance !== undefined && obj.distance !== null ? formatDistanceMeters(Number(obj.distance) > 20 ? Number(obj.distance) / 1000.0 : Number(obj.distance)) : "N/A";
+                const conf = obj.conf !== undefined && obj.conf !== null ? (Number(obj.conf) * 100).toFixed(0) + "%" : "N/A";
+                li.textContent = "Class: " + obj.class + " | Dist: " + dist + " | Conf: " + conf;
+                detList.appendChild(li);
+            });
+        }
     }
 
-    // Call SLAM Draw
-    if (d.state?.location) {
-       // Draw Map update
-       // We need to pass the whole state or just location
-       // Let's pass the car object or details
-       drawSlamMap(car);
-    }
+    const specs = d.state && d.state.specs ? d.state.specs : {};
+    document.getElementById("spec-device").innerText = specs.device || "Unknown";
+    document.getElementById("spec-cpu").innerText = specs.cpu_ram || "Unknown";
 
-    // Update Specs Tab
-    const specs = d.state?.specs || {}; 
-    document.getElementById('spec-device').innerText = specs.device || 'Unknown';
-    document.getElementById('spec-cpu').innerText = specs.cpu_ram || 'Unknown';
-    
-    // Format cameras nicely
-    let camText = 'None';
+    let camText = "None";
     if (specs.cameras && Array.isArray(specs.cameras)) {
-        camText = specs.cameras.map(c => `${c.type} (${c.width}x${c.height})`).join(', ');
+        camText = specs.cameras.map(function (c) {
+            return c.type + " (" + c.width + "x" + c.height + ")";
+        }).join(", ");
     } else if (specs.cameras) {
         camText = specs.cameras;
     }
-    document.getElementById('spec-cameras').innerText = camText;
-    
-    document.getElementById('spec-inference').innerText = specs.inference || 'Unknown';
-    document.getElementById('spec-resnet').innerText = specs.resnet_version || 'Unknown';
-    document.getElementById('spec-yolo').innerText = specs.yolo_version || 'Unknown';
+    document.getElementById("spec-cameras").innerText = camText;
+    document.getElementById("spec-inference").innerText = specs.inference || "Unknown";
+    document.getElementById("spec-resnet").innerText = specs.resnet_version || "Unknown";
+    document.getElementById("spec-yolo").innerText = specs.yolo_version || "Unknown";
 }
 
 function updateHomeStats() {
     const total = cars.length;
-    const active = cars.filter(c => c.status === 'online').length;
-    document.getElementById('stat-total').innerText = total;
-    document.getElementById('stat-active').innerText = active;
+    const active = cars.filter(function (c) { return c.status === "online"; }).length;
+    document.getElementById("stat-total").innerText = String(total);
+    document.getElementById("stat-active").innerText = String(active);
 }
 
-// --- Actions ---
 async function addTestClient() {
     try {
-        const res = await fetch('/api/test-client', { method: 'POST' });
-        if(!res.ok) throw new Error(await res.text());
+        const res = await fetch("/api/test-client", { method: "POST" });
+        if (!res.ok) throw new Error(await res.text());
+        setInlineStatus("Test client added.", "ok");
         fetchCars();
-    } catch(e) {
-        alert("Error adding test client: " + e.message);
+    } catch (err) {
+        setInlineStatus("Add test client failed.", "error");
+        console.error(err);
     }
 }
 
-// Deprecated: was for manual add
 async function addCar() {
-    const name = document.getElementById('new-name').value;
-    const ip = document.getElementById('new-ip').value;
-    const port = document.getElementById('new-port').value;
-    
-    if (!name || !ip) return alert("Fill all fields");
-    
-    await fetch('/api/cars', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name, ip, port: parseInt(port)})
-    });
-    
-    closeAddModal();
-    fetchCars();
+    const name = document.getElementById("new-name").value;
+    const ip = document.getElementById("new-ip").value;
+    const port = document.getElementById("new-port").value;
+
+    if (!name || !ip) {
+        setInlineStatus("Fill all fields.", "warn");
+        return;
+    }
+
+    try {
+        const res = await fetch("/api/cars", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name, ip: ip, port: parseInt(port, 10) })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        closeAddModal();
+        setInlineStatus("Car added.", "ok");
+        fetchCars();
+    } catch (err) {
+        setInlineStatus("Add car failed.", "error");
+        console.error(err);
+    }
 }
 
 async function deleteCar() {
-    if(!selectedCarId) return;
-    if(!confirm("Remove this car?")) return;
-    await fetch(`/api/cars/${selectedCarId}`, {method: 'DELETE'});
-    selectedCarId = null;
-    document.getElementById('car-detail-content').style.display = 'none';
-    document.querySelector('.empty-state').style.display = 'block';
-    fetchCars();
+    if (!selectedCarId) return;
+    if (!confirm("Remove this car?")) return;
+    try {
+        await fetch("/api/cars/" + encodeCarId(selectedCarId), { method: "DELETE" });
+        closeVideoSocket();
+        if (logPollInterval) {
+            clearInterval(logPollInterval);
+            logPollInterval = null;
+        }
+        selectedCarId = null;
+        document.getElementById("car-detail-content").style.display = "none";
+        document.querySelector(".empty-state").style.display = "block";
+        setInlineStatus("Car removed.", "ok");
+        fetchCars();
+    } catch (err) {
+        setInlineStatus("Remove car failed.", "error");
+        console.error(err);
+    }
 }
 
 async function controlAction(action) {
-    if(!selectedCarId) return;
-    await fetch(`/api/cars/${selectedCarId}/${action}`, {method: 'POST'});
-    // Provide immediate feedback
-    alert(`Sent ${action.toUpperCase()} command.`);
+    if (!selectedCarId) return;
+    try {
+        const res = await fetch("/api/cars/" + encodeCarId(selectedCarId) + "/" + action, { method: "POST" });
+        if (!res.ok) throw new Error(await res.text());
+        setInlineStatus(action.toUpperCase() + " command sent.", "ok");
+    } catch (err) {
+        setInlineStatus(action.toUpperCase() + " failed.", "error");
+        console.error(err);
+    }
 }
 
 async function updateSettings() {
-    if(!selectedCarId) return;
-    const mode = document.getElementById('tune-mode').value;
-    const throttle = parseFloat(document.getElementById('tune-throttle').value);
-    
-    await fetch(`/api/cars/${selectedCarId}/settings`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            throttle_mode: mode,
-            fixed_throttle_value: throttle
-        })
-    });
+    if (!selectedCarId) return;
+    const modeEl = document.getElementById("tune-mode");
+    const throttleEl = document.getElementById("tune-throttle");
+    if (!modeEl || !throttleEl) return;
+
+    try {
+        const res = await fetch("/api/cars/" + encodeCarId(selectedCarId) + "/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                throttle_mode: modeEl.value,
+                fixed_throttle_value: parseFloat(throttleEl.value)
+            })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        setInlineStatus("Tuning updated.", "ok");
+    } catch (err) {
+        setInlineStatus("Tuning update failed.", "error");
+        console.error(err);
+    }
 }
 
-// --- Modal ---
-function showAddModal() { document.getElementById('add-modal').style.display = 'flex'; }
-function closeAddModal() { document.getElementById('add-modal').style.display = 'none'; }
+function showAddModal() { document.getElementById("add-modal").style.display = "flex"; }
+function closeAddModal() { document.getElementById("add-modal").style.display = "none"; }
 
-// --- Config Modal ---
 function openConfigModal() {
-    if(!selectedCarId) return;
-    const car = cars.find(c => c.id === selectedCarId);
+    if (!selectedCarId) return;
+    const car = getSelectedCar();
     if (!car) return;
 
-    document.getElementById('config-modal').style.display = 'flex';
-    
-    // Populate with current car configuration if available
-    const cfg = car.details?.config || {};
-    if (Object.keys(cfg).length > 0) {
-        if (cfg.cameras && cfg.cameras.length > 0) {
-            const cam = cfg.cameras[0];
-            document.getElementById('cfg-cam-type').value = cam.type || 'realsense';
-            document.getElementById('cfg-cam-w').value = cam.width || 640;
-            document.getElementById('cfg-cam-h').value = cam.height || 480;
-            document.getElementById('cfg-cam-fps').value = cam.fps || 15;
-        }
-        document.getElementById('cfg-ctl-type').value = cfg.control_model_type || 'tensorrt';
-        document.getElementById('cfg-ctl-arch').value = cfg.architecture || 'resnet101';
-        document.getElementById('cfg-ctl-path').value = cfg.control_model || '';
-        document.getElementById('cfg-det-path').value = cfg.detection_model || '';
-        document.getElementById('cfg-device').value = cfg.device || 'cuda';
-        document.getElementById('cfg-actions').value = (cfg.action_loop || ['control', 'api']).join(',');
+    document.getElementById("config-modal").style.display = "flex";
+
+    const cfg = (car.details && car.details.config) ? car.details.config : {};
+    if (cfg.cameras && cfg.cameras.length > 0) {
+        const cam = cfg.cameras[0];
+        document.getElementById("cfg-cam-type").value = cam.type || "realsense";
+        document.getElementById("cfg-cam-w").value = cam.width || 640;
+        document.getElementById("cfg-cam-h").value = cam.height || 480;
+        document.getElementById("cfg-cam-fps").value = cam.fps || 15;
     }
+    document.getElementById("cfg-ctl-type").value = cfg.control_model_type || "tensorrt";
+    document.getElementById("cfg-ctl-arch").value = cfg.architecture || "resnet101";
+    document.getElementById("cfg-ctl-path").value = cfg.control_model || "";
+    document.getElementById("cfg-det-path").value = cfg.detection_model || "";
+    document.getElementById("cfg-device").value = cfg.device || "cuda";
+    document.getElementById("cfg-actions").value = (cfg.action_loop || ["control", "api"]).join(",");
 }
 
 function closeConfigModal() {
-    document.getElementById('config-modal').style.display = 'none';
+    document.getElementById("config-modal").style.display = "none";
 }
 
 function resetConfigToDefaults() {
-    document.getElementById('cfg-cam-type').value = 'realsense';
-    document.getElementById('cfg-cam-w').value = '640';
-    document.getElementById('cfg-cam-h').value = '480';
-    document.getElementById('cfg-cam-fps').value = '15';
-    document.getElementById('cfg-ctl-type').value = 'tensorrt';
-    document.getElementById('cfg-ctl-arch').value = 'resnet101';
-    document.getElementById('cfg-ctl-path').value = '/home/jetson/jetracer_run/checkpoints/checkpoints/model_7_resnet101/best_model_trt.pth';
-    document.getElementById('cfg-det-path').value = '';
-    document.getElementById('cfg-device').value = 'cuda';
-    document.getElementById('cfg-actions').value = 'control,detection,api';
+    document.getElementById("cfg-cam-type").value = "realsense";
+    document.getElementById("cfg-cam-w").value = "640";
+    document.getElementById("cfg-cam-h").value = "480";
+    document.getElementById("cfg-cam-fps").value = "15";
+    document.getElementById("cfg-ctl-type").value = "tensorrt";
+    document.getElementById("cfg-ctl-arch").value = "resnet101";
+    document.getElementById("cfg-ctl-path").value = "/home/jetson/jetracer_run/checkpoints/checkpoints/model_7_resnet101/best_model_trt.pth";
+    document.getElementById("cfg-det-path").value = "";
+    document.getElementById("cfg-device").value = "cuda";
+    document.getElementById("cfg-actions").value = "control,detection,api";
 }
 
 async function deployConfig() {
-    if(!selectedCarId) return;
-    
+    if (!selectedCarId) return;
+
+    const current = getSelectedCar();
+    const currentMission = current && current.details && current.details.config ? current.details.config.mission : null;
     const config = {
-        device: document.getElementById('cfg-device').value,
-        architecture: document.getElementById('cfg-ctl-arch').value,
+        device: document.getElementById("cfg-device").value,
+        architecture: document.getElementById("cfg-ctl-arch").value,
         cameras: [{
-            type: document.getElementById('cfg-cam-type').value,
-            width: parseInt(document.getElementById('cfg-cam-w').value),
-            height: parseInt(document.getElementById('cfg-cam-h').value),
-            fps: parseInt(document.getElementById('cfg-cam-fps').value),
+            type: document.getElementById("cfg-cam-type").value,
+            width: parseInt(document.getElementById("cfg-cam-w").value, 10),
+            height: parseInt(document.getElementById("cfg-cam-h").value, 10),
+            fps: parseInt(document.getElementById("cfg-cam-fps").value, 10),
             index: 0
         }],
-        control_model_type: document.getElementById('cfg-ctl-type').value,
-        control_model: document.getElementById('cfg-ctl-path').value,
-        detection_model: document.getElementById('cfg-det-path').value,
-        action_loop: document.getElementById('cfg-actions').value.split(',').map(s=>s.trim()),
-        ip: "0.0.0.0", // overridden by server proxy
-        port: 8000,
-        password: "changeme"
+        control_model_type: document.getElementById("cfg-ctl-type").value,
+        control_model: document.getElementById("cfg-ctl-path").value,
+        detection_model: document.getElementById("cfg-det-path").value,
+        action_loop: document.getElementById("cfg-actions").value.split(",").map(function (s) { return s.trim(); }).filter(Boolean),
+        ip: "0.0.0.0",
+        port: 8000
     };
+    if (currentMission) {
+        config.mission = currentMission;
+    }
 
     try {
-        const res = await fetch(`/api/cars/${selectedCarId}/config`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({config: config})
+        const res = await fetch("/api/cars/" + encodeCarId(selectedCarId) + "/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ config: config })
         });
         const data = await res.json();
-        // Treat both "configured" (HTTP) and "sent_via_ws" (WebSocket) as success
-        if(data.status === 'configured' || data.status === 'sent_via_ws') {
-            alert("Configuration Deployed Successfully!");
+        if (data.status === "configured" || data.status === "sent_via_ws" || data.status === "sent_via_http") {
+            setInlineStatus("Configuration deployed.", "ok");
             closeConfigModal();
+            fetchCars();
         } else {
-            alert("Error: " + JSON.stringify(data));
+            setInlineStatus("Deploy failed.", "error");
+            console.error(data);
         }
-    } catch(e) {
-        alert("Deploy failed: " + e);
+    } catch (err) {
+        setInlineStatus("Deploy failed.", "error");
+        console.error(err);
     }
 }
 
-// --- Global Settings ---
 function saveGlobalSettings() {
-    const poll = document.getElementById('setting-poll').value;
-    // Update poll interval
+    const poll = document.getElementById("setting-poll").value;
+    const pollMs = parseInt(poll, 10);
+    if (isFinite(pollMs) && pollMs > 0) {
+        pollIntervalMs = pollMs;
+    }
     if (pollInterval) clearInterval(pollInterval);
-    setInterval(fetchCars, parseInt(poll));
-    alert("Settings Saved");
+    pollInterval = setInterval(fetchCars, pollIntervalMs);
+    setInlineStatus("Settings saved.", "ok");
 }
 
-// --- Charts ---
-let statusChart = null;
-
 function updateCharts() {
-    // Simple Status Pie Chart
-    const ctx = document.getElementById('statusChart').getContext('2d');
-    const online = cars.filter(c => c.status === 'online').length;
-    const stopped = cars.filter(c => c.status === 'stopped').length;
-    const offline = cars.filter(c => c.status === 'offline' || c.status === 'unknown').length;
-    
+    const canvas = document.getElementById("statusChart");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const online = cars.filter(function (c) { return c.status === "online"; }).length;
+    const stopped = cars.filter(function (c) { return c.status === "stopped"; }).length;
+    const offline = cars.filter(function (c) { return c.status === "offline" || c.status === "unknown"; }).length;
+
     if (statusChart) {
         statusChart.data.datasets[0].data = [online, stopped, offline];
         statusChart.update();
     } else {
         statusChart = new Chart(ctx, {
-            type: 'doughnut',
+            type: "doughnut",
             data: {
-                labels: ['Running', 'Stopped', 'Offline'],
+                labels: ["Running", "Stopped", "Offline"],
                 datasets: [{
                     data: [online, stopped, offline],
-                    backgroundColor: ['#28a745', '#dc3545', '#6c757d']
+                    backgroundColor: ["#28a745", "#dc3545", "#6c757d"]
                 }]
             },
-            options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+            options: { responsive: true, plugins: { legend: { position: "bottom" } } }
         });
     }
 }
 
-// --- SLAM Frontend ---
-let mapScale = 50.0; // pixels per meter
-let mapCanvas = null;
-let mapCtx = null;
-let selectedDestination = null;
-
-function setupMapCanvas() {
-    mapCanvas = document.getElementById('slam-map');
-    if (!mapCanvas) return;
-    
-    mapCtx = mapCanvas.getContext('2d');
-    
-    // Support clicking to set destination
-    mapCanvas.addEventListener('mousedown', async (e) => {
-        if (!selectedCarId) return;
-        
-        const rect = mapCanvas.getBoundingClientRect();
-        const clickX = e.clientX - rect.left;
-        const clickY = e.clientY - rect.top;
-        
-        // Convert screen to world
-        // Center is (width/2, height/2)
-        // World 0,0 is at center
-        // X is Right, Y is Up (in screen, Y is Down)
-        const centerX = mapCanvas.width / 2;
-        const centerY = mapCanvas.height / 2;
-        
-        const worldX = (clickX - centerX) / mapScale;
-        const worldY = -(clickY - centerY) / mapScale; // invert Y
-        
-        selectedDestination = {x: worldX, y: worldY};
-        
-        // Send command
-        try {
-            await fetch(`/api/cars/${selectedCarId}/navigate`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({x: worldX, y: worldY})
-            });
-            console.log("Navigating to", worldX, worldY);
-        } catch(e) {
-            console.error(e);
-        }
-    });
-}
-
-function drawSlamMap(car) {
-    if (!mapCtx) setupMapCanvas();
-    if (!mapCtx) return;
-    
-    const w = mapCanvas.width;
-    const h = mapCanvas.height;
-    const cx = w / 2;
-    const cy = h / 2;
-    
-    // Clear
-    mapCtx.fillStyle = "#000";
-    mapCtx.fillRect(0, 0, w, h);
-    
-    // Draw Grid (1m lines)
-    mapCtx.strokeStyle = "#333";
-    mapCtx.lineWidth = 1;
-    mapCtx.beginPath();
-    
-    // Vertical lines
-    for(let x=-10; x<=10; x++) {
-        const sx = cx + x * mapScale;
-        mapCtx.moveTo(sx, 0); mapCtx.lineTo(sx, h);
-    }
-    // Horizontal lines
-    for(let y=-10; y<=10; y++) {
-        const sy = cy - y * mapScale;
-        mapCtx.moveTo(0, sy); mapCtx.lineTo(w, sy);
-    }
-    mapCtx.stroke();
-    
-    // Origin
-    mapCtx.fillStyle = "#555";
-    mapCtx.beginPath();
-    mapCtx.arc(cx, cy, 3, 0, 2*Math.PI);
-    mapCtx.fill();
-    
-    // Get state
-    const state = car.details?.state || {};
-    const loc = state.location || {x: 0, y: 0, theta: 0};
-    
-    document.getElementById('slam-coords').innerText = 
-        `X: ${loc.x.toFixed(2)} Y: ${loc.y.toFixed(2)} θ: ${(loc.theta * 180 / Math.PI).toFixed(0)}°`;
-    
-    // Draw Trajectory
-    if (loc.trajectory && loc.trajectory.length > 0) {
-        mapCtx.strokeStyle = "#0ff";
-        mapCtx.lineWidth = 2;
-        mapCtx.beginPath();
-        loc.trajectory.forEach((pt, i) => {
-            const sx = cx + pt[0] * mapScale;
-            const sy = cy - pt[1] * mapScale;
-            if (i===0) mapCtx.moveTo(sx, sy);
-            else mapCtx.lineTo(sx, sy);
-        });
-        // Draw line to current
-        const currSx = cx + loc.x * mapScale;
-        const currSy = cy - loc.y * mapScale;
-        mapCtx.lineTo(currSx, currSy);
-        mapCtx.stroke();
-    }
-    
-    // Draw Destination
-    if (selectedDestination) {
-        const dx = cx + selectedDestination.x * mapScale;
-        const dy = cy - selectedDestination.y * mapScale;
-        
-        mapCtx.strokeStyle = "#f0f"; // Magenta target
-        mapCtx.beginPath();
-        mapCtx.arc(dx, dy, 5, 0, 2*Math.PI);
-        mapCtx.stroke();
-        
-        // Line to target
-        mapCtx.setLineDash([5, 5]);
-        mapCtx.beginPath();
-        mapCtx.moveTo(cx + loc.x * mapScale, cy - loc.y * mapScale);
-        mapCtx.lineTo(dx, dy);
-        mapCtx.stroke();
-        mapCtx.setLineDash([]);
-    }
-    
-    // Draw Car
-    const carSx = cx + loc.x * mapScale;
-    const carSy = cy - loc.y * mapScale;
-    
-    mapCtx.save();
-    mapCtx.translate(carSx, carSy);
-    mapCtx.rotate(-loc.theta); // -theta because canvas Y is down? No, standard rotate is CW. Theta is CCW normally.
-    // If loc.theta is standard math angle (CCW from X), and Canvas Y is inverted...
-    // World: +Y is Up. Screen: +Y is Down.
-    // Math: +Angle is CCW. Screen: +Angle is CW.
-    // So to draw CCW angle on inverted Y, we need -angle.
-    
-    // Car Body
-    mapCtx.fillStyle = "#0f0";
-    mapCtx.fillRect(-10, -5, 20, 10); // 20px long car
-    
-    // Direction Indicator
-    mapCtx.fillStyle = "#fff";
-    mapCtx.fillRect(5, -5, 5, 10); // Front lights
-    
-    mapCtx.restore();
-}
-
-async function cancelNavigation() {
-    if (!selectedCarId) return;
-    selectedDestination = null;
-    await fetch(`/api/cars/${selectedCarId}/navigate/cancel`, {method: 'POST'});
-}
-
-// Init
-window.onclick = function(event) {
-    if (event.target == document.getElementById('add-modal')) {
+window.onclick = function (event) {
+    if (event.target === document.getElementById("add-modal")) {
         closeAddModal();
     }
-    if (event.target == document.getElementById('config-modal')) {
+    if (event.target === document.getElementById("config-modal")) {
         closeConfigModal();
     }
-}
+};
 
 startPolling();
 fetchHostInfo();

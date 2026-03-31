@@ -35,8 +35,20 @@ PCA9685 servo driver to steer the car.
 - Autonomous lane following on indoor track
 - RealSense center-depth measurement for safety / debugging
 - REST API for live predictions
-- Streamlit demo UI
-- Dockerfile for Streamlit deployment
+- Host dashboard for fleet/operator monitoring
+- Dockerfile support for deployment workflows
+
+## Expo Demo Mode / AutoNav Slice
+
+This repository also supports an expo-ready AutoNav slice layered on top of the existing lane follower.
+
+- Default route name: `expo_route`
+- Default checkpoint tags: `start/home = 10`, `checkpoint = 20`, `goal = 30`
+- Ordered behavior: the route starts in `RUNNING`, tag `20` marks checkpoint progress, and tag `30` only counts after the checkpoint has been seen
+- Depth-based obstacle stop is independent of YOLO and uses the RealSense front ROI
+- Obstacle stops require a manual operator restart for safety
+- SLAM is not required for demo mode
+- If AprilTag support is unavailable at runtime, the car keeps lane following and reports tag detection as unavailable
 
 ## Development Workflow
 
