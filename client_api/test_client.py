@@ -1,5 +1,7 @@
 import pytest
 import sys
+import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 # Mock smbus2 to avoid fcntl import errors on Windows
@@ -169,3 +171,20 @@ def test_role_based_camera_config_parses():
     if hasattr(rear, "role"):
         assert rear.role == "rear_preview"
         assert rear.enabled is False
+
+
+def test_example_cam0_primary_config_parses_if_present():
+    example_path = Path(__file__).resolve().parent.parent / "docs" / "examples" / "client_config_cam0_primary.json"
+    assert example_path.exists(), f"Missing required example config: {example_path}"
+
+    payload = json.loads(example_path.read_text())
+    config = ClientConfig(**payload)
+
+    assert config.cameras
+    assert config.cameras[0].role == "primary_rgb"
+    assert config.cameras[0].type == "csi"
+    assert config.cameras[0].sensor_id == 0
+
+    if hasattr(config, "preprocess_profile"):
+        assert config.preprocess_profile == "cam0_fisheye_v1"
+    assert config.password == "changeme"

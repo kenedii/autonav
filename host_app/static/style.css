@@ -193,6 +193,32 @@ main {
 
 .control-group h3 { margin-top: 0; }
 
+.validation-strip,
+.sensor-health-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+
+.validation-item,
+.health-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.45rem 0.65rem;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.05);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+}
+
+.validation-item strong,
+.health-chip strong {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
 .form-row {
     margin-bottom: 0.5rem;
 }

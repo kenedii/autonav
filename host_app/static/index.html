@@ -100,6 +100,12 @@
                                             <div><strong>Vehicle:</strong> <span id="detail-activity">Idle</span></div>
                                             <div><strong>FPS:</strong> <span id="detail-fps">0</span></div>
                                         </div>
+                                        <div class="validation-strip" aria-label="runtime validation summary">
+                                            <span class="validation-item"><strong>Tag Detector</strong> <span class="status-badge neutral" id="validation-tag-status">Unknown</span></span>
+                                            <span class="validation-item"><strong>Control Model</strong> <span class="status-badge neutral" id="validation-model-status">Unknown</span></span>
+                                            <span class="validation-item"><strong>Depth</strong> <span class="status-badge neutral" id="validation-depth-status">Unknown</span></span>
+                                            <span class="validation-item"><strong>Stop Reason</strong> <span class="status-badge neutral" id="validation-stop-reason">No stop reason</span></span>
+                                        </div>
                                     </div>
 
                                     <div class="control-group sensor-panel">
@@ -110,6 +116,7 @@
                                             </div>
                                             <span class="status-badge neutral" id="forward-preview-role-badge">CAM0</span>
                                         </div>
+                                        <div class="sensor-health-strip" id="sensor-health-strip" aria-label="sensor health summary"></div>
                                         <div id="sensor-rig-panel" class="sensor-rig-grid">
                                             <!-- Populated by JS -->
                                         </div>

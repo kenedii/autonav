@@ -21,10 +21,30 @@ def test_add_test_client():
     assert sensors["primary_rgb"]["role"] == "primary_rgb"
     assert sensors["sidecar_depth_imu"]["role"] == "sidecar_depth_imu"
     assert sensors["rear_preview"]["role"] == "rear_preview"
+    assert sensors["depth"]["role"] == "depth"
+    assert sensors["imu"]["role"] == "imu"
+    assert sensors["rear"]["role"] == "rear"
+    assert sensors["primary_rgb"]["source"] == "cam0"
+    assert sensors["sidecar_depth_imu"]["source"] == "realsense"
+    assert sensors["rear_preview"]["source"] == "cam1"
     assert car["details"]["config"]["cameras"][0]["role"] == "primary_rgb"
     assert car["details"]["config"]["preprocess_profile"] == "cam0_fisheye_v1"
     assert car["details"]["state"]["location"]["imu"]["accel"] == [0.01, -0.02, 0.98]
     assert car["details"]["state"]["specs"]["cameras"][1]["role"] == "sidecar_depth_imu"
+
+    required_sensor_fields = {
+        "primary_rgb": ("frame_age_ms", "used_for"),
+        "sidecar_depth_imu": ("depth_status", "depth_frame_age_ms", "imu_status", "imu_frame_age_ms"),
+        "depth": ("frame_age_ms", "used_for"),
+        "imu": ("frame_age_ms", "used_for"),
+        "rear_preview": ("frame_age_ms",),
+        "rear": ("frame_age_ms", "used_for"),
+    }
+    for sensor_name, fields in required_sensor_fields.items():
+        sensor = sensors[sensor_name]
+        for field in fields:
+            assert field in sensor
+            assert sensor[field] is None or isinstance(sensor[field], (int, float, list, str))
 
     logs_resp = client.get(f"/api/cars/{client_id}/logs")
     assert logs_resp.status_code == 200
@@ -84,6 +104,64 @@ def test_safe_car_redacts_passwords():
     assert "password" not in safe["details"]["config"]
     assert safe["details"]["state"]["sensors"]["forward_preview_role"] == "primary_rgb"
     assert safe["details"]["state"]["sensors"]["primary_rgb"]["role"] == "primary_rgb"
+
+
+def test_safe_car_preserves_sensor_age_and_status_fields():
+    record = {
+        "id": "car-2",
+        "name": "Car 2",
+        "details": {
+            "state": {
+                "sensors": {
+                    "forward_preview_role": "primary_rgb",
+                    "primary_rgb": {
+                        "role": "primary_rgb",
+                        "status": "available",
+                        "source": "cam0",
+                        "frame_age_ms": 12.0,
+                        "used_for": ["lane_following", "forward_preview"],
+                    },
+                    "sidecar_depth_imu": {
+                        "role": "sidecar_depth_imu",
+                        "status": "available",
+                        "source": "realsense",
+                        "depth_status": "available",
+                        "depth_frame_age_ms": 4.5,
+                        "imu_status": "unavailable",
+                        "imu_frame_age_ms": None,
+                    },
+                    "rear_preview": {
+                        "role": "rear_preview",
+                        "status": "disabled",
+                        "source": "cam1",
+                        "frame_age_ms": None,
+                    },
+                    "depth": {
+                        "role": "depth",
+                        "source": "realsense",
+                        "status": "available",
+                        "frame_age_ms": 4.5,
+                    },
+                    "imu": {
+                        "role": "imu",
+                        "source": "realsense",
+                        "status": "unavailable",
+                        "frame_age_ms": None,
+                    },
+                }
+            }
+        },
+    }
+
+    safe = _safe_car(record)
+
+    sensors = safe["details"]["state"]["sensors"]
+    assert sensors["primary_rgb"]["frame_age_ms"] == 12.0
+    assert sensors["sidecar_depth_imu"]["depth_status"] == "available"
+    assert sensors["sidecar_depth_imu"]["imu_status"] == "unavailable"
+    assert sensors["rear_preview"]["status"] == "disabled"
+    assert sensors["depth"]["source"] == "realsense"
+    assert sensors["imu"]["status"] == "unavailable"
 
 
 def test_car_log_since_filters_incrementally():

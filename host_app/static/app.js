@@ -65,6 +65,36 @@ function formatVector(vec) {
     return "X:" + Number(vec[0]).toFixed(2) + " Y:" + Number(vec[1]).toFixed(2) + " Z:" + Number(vec[2]).toFixed(2);
 }
 
+function formatAgeMs(value) {
+    if (value === null || value === undefined || value === "") return "N/A";
+    const num = Number(value);
+    if (!isFinite(num)) return "N/A";
+    return Math.round(num) + " ms";
+}
+
+function formatList(value) {
+    if (!Array.isArray(value) || !value.length) return "";
+    return value.join(", ");
+}
+
+function availabilityKind(value) {
+    const status = String(value || "").trim().toLowerCase();
+    if (!status) return "neutral";
+    if (status.includes("unavailable") || status.includes("failed") || status.includes("error") || status.includes("fault")) {
+        return "danger";
+    }
+    if (status.includes("warn") || status.includes("degraded")) {
+        return "warning";
+    }
+    if (status.includes("disabled") || status.includes("unconfigured") || status.includes("configured") || status.includes("standby") || status.includes("unknown")) {
+        return "neutral";
+    }
+    if (status.includes("available") || status.includes("healthy") || status === "ok") {
+        return "ok";
+    }
+    return "neutral";
+}
+
 const SENSOR_ROLE_META = [
     {
         key: "primary_rgb",
@@ -92,17 +122,7 @@ function sensorStatusText(sensor) {
 }
 
 function sensorStatusKind(sensor) {
-    const status = sensorStatusText(sensor).toLowerCase();
-    if (status.includes("available") || status.includes("healthy") || status === "ok") {
-        return "ok";
-    }
-    if (status.includes("configured") || status.includes("standby") || status.includes("disabled") || status.includes("unconfigured")) {
-        return "neutral";
-    }
-    if (status.includes("warn") || status.includes("degraded")) {
-        return "warning";
-    }
-    return "danger";
+    return availabilityKind(sensorStatusText(sensor));
 }
 
 function cameraSummary(camera) {
@@ -120,10 +140,21 @@ function formatSensorDetail(sensor) {
     if (sensor.source) lines.push("source " + sensor.source);
     if (sensor.sensor_id !== undefined && sensor.sensor_id !== null) lines.push("sensor " + sensor.sensor_id);
     if (sensor.flip_method !== undefined && sensor.flip_method !== null) lines.push("flip " + sensor.flip_method);
+    if (sensor.frame_age_ms !== undefined && sensor.frame_age_ms !== null) lines.push("frame age " + formatAgeMs(sensor.frame_age_ms));
+    if (sensor.depth_status) lines.push("depth status " + sensor.depth_status);
+    if (sensor.depth_frame_age_ms !== undefined && sensor.depth_frame_age_ms !== null) lines.push("depth age " + formatAgeMs(sensor.depth_frame_age_ms));
+    if (sensor.imu_status) lines.push("imu status " + sensor.imu_status);
+    if (sensor.imu_frame_age_ms !== undefined && sensor.imu_frame_age_ms !== null) lines.push("imu age " + formatAgeMs(sensor.imu_frame_age_ms));
     if (sensor.depth) lines.push("depth " + sensor.depth);
     if (sensor.imu) lines.push("imu " + sensor.imu);
+    if (sensor.used_for) {
+        const usedFor = formatList(sensor.used_for);
+        if (usedFor) lines.push("used for " + usedFor);
+    }
+    if (sensor.present !== undefined) lines.push("present " + formatBool(sensor.present));
     if (sensor.healthy !== undefined) lines.push("healthy " + formatBool(sensor.healthy));
     if (sensor.enabled !== undefined) lines.push("enabled " + formatBool(sensor.enabled));
+    if (sensor.error) lines.push("error " + sensor.error);
     return lines;
 }
 
@@ -185,6 +216,21 @@ function renderSensorRig(sensorRig) {
         card.appendChild(metaList);
         panel.appendChild(card);
     });
+
+    const extraStrip = document.getElementById("sensor-health-strip");
+    if (extraStrip) {
+        const primary = rig.primary_rgb || {};
+        const sidecar = rig.sidecar_depth_imu || {};
+        const depth = rig.depth || sidecar;
+        const imu = rig.imu || sidecar;
+        const rear = rig.rear || rig.rear_preview || {};
+        extraStrip.innerHTML = [
+            "<span class=\"health-chip\"><strong>Primary</strong> " + sensorStatusText(primary) + " · " + formatAgeMs(primary.frame_age_ms) + "</span>",
+            "<span class=\"health-chip\"><strong>Depth</strong> " + sensorStatusText(depth) + " · " + formatAgeMs(depth.depth_frame_age_ms !== undefined ? depth.depth_frame_age_ms : depth.frame_age_ms) + "</span>",
+            "<span class=\"health-chip\"><strong>IMU</strong> " + sensorStatusText(imu) + " · " + formatAgeMs(imu.imu_frame_age_ms !== undefined ? imu.imu_frame_age_ms : imu.frame_age_ms) + "</span>",
+            "<span class=\"health-chip\"><strong>Rear</strong> " + sensorStatusText(rear) + " · " + formatAgeMs(rear.frame_age_ms) + "</span>"
+        ].join("");
+    }
 }
 
 function getCameraByRole(cameras, role) {
@@ -524,6 +570,8 @@ function updateMissionView(mission) {
     const missionState = state.state || "IDLE";
     const stopReason = state.stop_reason || "";
     const detectorStatus = state.tag_detector_status || "Unknown";
+    const controlStatus = state.control_model_status || "Unknown";
+    const depthStatus = state.depth_status || "Unknown";
 
     setBadge("mission-state-badge", missionState, missionState === "FAULT_STOP" ? "danger" : missionState === "COMPLETE" ? "success" : missionState === "RUNNING" || missionState === "APPROACH_GOAL" ? "ok" : "neutral");
     setBadge("stop-reason-badge", stopReason ? stopReason : "No stop reason", stopReason ? "warning" : "neutral");
@@ -535,6 +583,11 @@ function updateMissionView(mission) {
     setText("route-checkpoint-seen", formatBool(state.checkpoint_seen));
     setText("route-goal-seen", formatBool(state.goal_seen));
     setText("route-expected-next", state.expected_next_tag === null || state.expected_next_tag === undefined ? "N/A" : String(state.expected_next_tag));
+
+    setBadge("validation-tag-status", detectorStatus, availabilityKind(detectorStatus));
+    setBadge("validation-model-status", controlStatus, availabilityKind(controlStatus));
+    setBadge("validation-depth-status", depthStatus, availabilityKind(depthStatus));
+    setBadge("validation-stop-reason", stopReason ? stopReason : "No stop reason", stopReason ? "warning" : "neutral");
 }
 
 function updateDetailView() {
@@ -576,7 +629,7 @@ function updateDetailView() {
     }
 
     const loc = state.location || {};
-    const imu = loc.imu || (sensorRig.sidecar_depth_imu && sensorRig.sidecar_depth_imu.imu_data) || {};
+    const imu = loc.imu || sensorRig.imu_data || (sensorRig.sidecar_depth_imu && sensorRig.sidecar_depth_imu.imu_data) || {};
     document.getElementById("imu-accel").innerText = imu.accel ? formatVector(imu.accel) : "N/A";
     document.getElementById("imu-gyro").innerText = imu.gyro ? formatVector(imu.gyro) : "N/A";
 

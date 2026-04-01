@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import time
+import logging
 from smbus2 import SMBus
 import platform
 import subprocess
@@ -62,6 +63,12 @@ ROLE_PRIMARY_RGB = "primary_rgb"
 ROLE_SIDECAR_DEPTH_IMU = "sidecar_depth_imu"
 ROLE_REAR_PREVIEW = "rear_preview"
 ROLE_ORDER = [ROLE_PRIMARY_RGB, ROLE_SIDECAR_DEPTH_IMU, ROLE_REAR_PREVIEW]
+ROLE_USED_FOR = {
+    ROLE_PRIMARY_RGB: ["lane_following", "apriltag", "forward_preview"],
+    ROLE_SIDECAR_DEPTH_IMU: ["obstacle_stop", "state_context"],
+    ROLE_REAR_PREVIEW: ["rear_preview_only"],
+}
+logger = logging.getLogger("Hardware")
 
 
 def _coerce_bool(value, default=True):
@@ -363,10 +370,13 @@ class CompositeSensorRig:
         self,
         primary_rgb_camera=None,
         primary_rgb_config=None,
+        primary_rgb_error=None,
         sidecar_depth_imu_sensor=None,
         sidecar_depth_imu_config=None,
+        sidecar_depth_imu_error=None,
         rear_preview_camera=None,
         rear_preview_config=None,
+        rear_preview_error=None,
         depth_aligned_to_primary=False,
     ):
         self.primary_rgb_camera = primary_rgb_camera
@@ -378,31 +388,63 @@ class CompositeSensorRig:
         self.depth_aligned_to_primary = bool(depth_aligned_to_primary)
         self.forward_preview_role = ROLE_PRIMARY_RGB
         self._last_status = {
-            ROLE_PRIMARY_RGB: {
-                "status": "disabled" if primary_rgb_camera is None else "configured",
-                "frame_available": False,
-                "depth_available": False,
-                "imu_available": False,
-                "last_frame_ts": None,
-                "aliased_to": None,
-            },
-            ROLE_SIDECAR_DEPTH_IMU: {
-                "status": "disabled" if sidecar_depth_imu_sensor is None else "configured",
-                "frame_available": False,
-                "depth_available": False,
-                "imu_available": False,
-                "last_frame_ts": None,
-                "aliased_to": ROLE_PRIMARY_RGB if primary_rgb_camera is sidecar_depth_imu_sensor and primary_rgb_camera is not None else None,
-            },
-            ROLE_REAR_PREVIEW: {
-                "status": "disabled" if rear_preview_camera is None else "configured",
-                "frame_available": False,
-                "depth_available": False,
-                "imu_available": False,
-                "last_frame_ts": None,
-                "aliased_to": None,
-            },
+            ROLE_PRIMARY_RGB: self._initial_role_status(
+                primary_rgb_camera,
+                primary_rgb_config,
+                error=primary_rgb_error,
+            ),
+            ROLE_SIDECAR_DEPTH_IMU: self._initial_role_status(
+                sidecar_depth_imu_sensor,
+                sidecar_depth_imu_config,
+                aliased_to=ROLE_PRIMARY_RGB if primary_rgb_camera is sidecar_depth_imu_sensor and primary_rgb_camera is not None else None,
+                error=sidecar_depth_imu_error,
+            ),
+            ROLE_REAR_PREVIEW: self._initial_role_status(
+                rear_preview_camera,
+                rear_preview_config,
+                error=rear_preview_error,
+            ),
         }
+
+    def _initial_role_status(self, camera, config, aliased_to=None, error=None):
+        if config is None:
+            status_name = "disabled"
+        elif camera is None:
+            status_name = "unavailable"
+        else:
+            status_name = "configured"
+        return {
+            "status": status_name,
+            "frame_available": False,
+            "depth_available": False,
+            "imu_available": False,
+            "last_frame_ts": None,
+            "last_depth_ts": None,
+            "last_imu_ts": None,
+            "aliased_to": aliased_to,
+            "present": camera is not None,
+            "error": str(error) if error else None,
+        }
+
+    def _age_ms(self, ts, now_ts=None):
+        if ts is None:
+            return None
+        if now_ts is None:
+            now_ts = time.time()
+        return int(max(0.0, (now_ts - ts) * 1000.0))
+
+    def _is_recent(self, ts, now_ts=None, max_age_ms=2000):
+        age_ms = self._age_ms(ts, now_ts=now_ts)
+        return age_ms is not None and age_ms <= max_age_ms
+
+    def _modality_status(self, configured, available, role_status):
+        if not configured:
+            return "disabled"
+        if available:
+            return "available"
+        if role_status == "configured":
+            return "configured"
+        return "unavailable"
 
     def _update_status(self, role, frame_available=False, depth_available=False, imu_available=False):
         status = self._last_status[role]
@@ -411,40 +453,81 @@ class CompositeSensorRig:
         status["imu_available"] = bool(imu_available)
         if frame_available or depth_available or imu_available:
             status["status"] = "available"
-            status["last_frame_ts"] = time.time()
+            now_ts = time.time()
+            if frame_available:
+                status["last_frame_ts"] = now_ts
+            if depth_available:
+                status["last_depth_ts"] = now_ts
+            if imu_available:
+                status["last_imu_ts"] = now_ts
         elif status["status"] != "disabled":
             status["status"] = "unavailable"
 
     def snapshot(self):
+        now_ts = time.time()
         return {
             "forward_preview_role": self.forward_preview_role,
             "depth_aligned_to_primary": bool(self.depth_aligned_to_primary),
-            ROLE_PRIMARY_RGB: self._role_snapshot(ROLE_PRIMARY_RGB, self.primary_rgb_config),
-            ROLE_SIDECAR_DEPTH_IMU: self._role_snapshot(ROLE_SIDECAR_DEPTH_IMU, self.sidecar_depth_imu_config),
-            ROLE_REAR_PREVIEW: self._role_snapshot(ROLE_REAR_PREVIEW, self.rear_preview_config),
+            ROLE_PRIMARY_RGB: self._role_snapshot(ROLE_PRIMARY_RGB, self.primary_rgb_config, now_ts=now_ts),
+            ROLE_SIDECAR_DEPTH_IMU: self._role_snapshot(ROLE_SIDECAR_DEPTH_IMU, self.sidecar_depth_imu_config, now_ts=now_ts),
+            ROLE_REAR_PREVIEW: self._role_snapshot(ROLE_REAR_PREVIEW, self.rear_preview_config, now_ts=now_ts),
+            "depth": self._alias_snapshot(ROLE_SIDECAR_DEPTH_IMU, "depth", now_ts=now_ts, used_for=["obstacle_stop"]),
+            "imu": self._alias_snapshot(ROLE_SIDECAR_DEPTH_IMU, "imu", now_ts=now_ts, used_for=["state_context"]),
+            "rear": self._alias_snapshot(ROLE_REAR_PREVIEW, "rear", now_ts=now_ts, used_for=["rear_preview_only"]),
         }
 
-    def _role_snapshot(self, role, config):
+    def _role_snapshot(self, role, config, now_ts=None):
         status = dict(self._last_status[role])
         status_name = status.get("status", "disabled")
-        depth_state = "disabled"
-        imu_state = "disabled"
+        frame_recent = self._is_recent(status.get("last_frame_ts"), now_ts=now_ts)
+        depth_recent = self._is_recent(status.get("last_depth_ts"), now_ts=now_ts)
+        imu_recent = self._is_recent(status.get("last_imu_ts"), now_ts=now_ts)
+        depth_state = self._modality_status(
+            config is not None,
+            status.get("depth_available", False),
+            status_name,
+        )
+        imu_state = self._modality_status(
+            config is not None,
+            status.get("imu_available", False),
+            status_name,
+        )
+        depth_frame_age_ms = None
+        imu_frame_age_ms = None
         if role == ROLE_SIDECAR_DEPTH_IMU and config is not None:
-            depth_state = "available" if status.get("depth_available") else "unavailable"
-            imu_state = "available" if status.get("imu_available") else "unavailable"
+            depth_frame_age_ms = self._age_ms(status.get("last_depth_ts"), now_ts=now_ts)
+            imu_frame_age_ms = self._age_ms(status.get("last_imu_ts"), now_ts=now_ts)
+        frame_age_ms = self._age_ms(status.get("last_frame_ts"), now_ts=now_ts)
+        if role != ROLE_SIDECAR_DEPTH_IMU:
+            depth_frame_age_ms = None
+            imu_frame_age_ms = None
+        healthy = False
+        if status_name == "available":
+            if role == ROLE_SIDECAR_DEPTH_IMU:
+                healthy = bool(frame_recent or depth_recent or imu_recent)
+            else:
+                healthy = bool(frame_recent)
         snapshot = {
             "role": role,
             "configured": config is not None,
             "enabled": bool((config or {}).get("enabled", False)),
+            "present": bool(status.get("present", False)),
             "status": status_name,
-            "healthy": status_name in ("available", "configured"),
+            "healthy": healthy,
             "frame_available": status.get("frame_available", False),
             "depth_available": status.get("depth_available", False),
             "imu_available": status.get("imu_available", False),
             "last_frame_ts": status.get("last_frame_ts"),
+            "frame_age_ms": frame_age_ms,
+            "depth_status": depth_state if role == ROLE_SIDECAR_DEPTH_IMU else None,
+            "depth_frame_age_ms": depth_frame_age_ms,
+            "imu_status": imu_state if role == ROLE_SIDECAR_DEPTH_IMU else None,
+            "imu_frame_age_ms": imu_frame_age_ms,
             "aliased_to": status.get("aliased_to"),
             "depth": depth_state,
             "imu": imu_state,
+            "used_for": list(ROLE_USED_FOR.get(role, [])),
+            "error": status.get("error"),
         }
         if config:
             label = "Sensor"
@@ -471,6 +554,54 @@ class CompositeSensorRig:
                 "index": config.get("index"),
                 "flip_method": config.get("flip_method"),
             })
+        return snapshot
+
+    def _alias_snapshot(self, source_role, alias_role, now_ts=None, used_for=None):
+        snapshot = dict(self._role_snapshot(source_role, getattr(self, f"{source_role}_config", None), now_ts=now_ts))
+        snapshot.update({
+            "role": alias_role,
+            "used_for": list(used_for or ROLE_USED_FOR.get(alias_role, [])),
+        })
+        if alias_role == "depth":
+            depth_status = self._modality_status(
+                snapshot.get("configured"),
+                snapshot.get("depth_available"),
+                snapshot.get("status"),
+            )
+            snapshot["status"] = depth_status
+            snapshot["healthy"] = depth_status == "available" and self._is_recent(
+                self._last_status[source_role].get("last_depth_ts"),
+                now_ts=now_ts,
+            )
+            snapshot["frame_available"] = bool(snapshot.get("depth_available"))
+            snapshot["frame_age_ms"] = snapshot.get("depth_frame_age_ms")
+            snapshot["depth"] = depth_status
+            snapshot["depth_status"] = depth_status
+            snapshot["imu"] = "disabled"
+            snapshot["imu_status"] = "disabled"
+            snapshot["source"] = "realsense" if snapshot.get("configured") else snapshot.get("source")
+            snapshot["label"] = "Depth Sidecar"
+        elif alias_role == "imu":
+            imu_status = self._modality_status(
+                snapshot.get("configured"),
+                snapshot.get("imu_available"),
+                snapshot.get("status"),
+            )
+            snapshot["status"] = imu_status
+            snapshot["healthy"] = imu_status == "available" and self._is_recent(
+                self._last_status[source_role].get("last_imu_ts"),
+                now_ts=now_ts,
+            )
+            snapshot["frame_available"] = bool(snapshot.get("imu_available"))
+            snapshot["frame_age_ms"] = snapshot.get("imu_frame_age_ms")
+            snapshot["depth"] = "disabled"
+            snapshot["depth_status"] = "disabled"
+            snapshot["imu"] = imu_status
+            snapshot["imu_status"] = imu_status
+            snapshot["source"] = "realsense" if snapshot.get("configured") else snapshot.get("source")
+            snapshot["label"] = "IMU Sidecar"
+        elif alias_role == "rear":
+            snapshot["label"] = "Rear Preview"
         return snapshot
 
     def read(self, include_rear=False):
@@ -584,19 +715,43 @@ def build_sensor_rig(camera_configs, enable_depth=True):
     primary_camera = None
     sidecar_camera = None
     rear_camera = None
+    primary_error = None
+    sidecar_error = None
+    rear_error = None
 
     if primary_cfg is not None:
         primary_enable_depth = bool(enable_depth and primary_cfg is sidecar_cfg and primary_cfg.get("type") == "realsense")
-        primary_camera = get_camera(primary_cfg, enable_depth=primary_enable_depth)
+        try:
+            primary_camera = get_camera(primary_cfg, enable_depth=primary_enable_depth)
+        except Exception as exc:
+            primary_error = str(exc)
+            logger.warning("Primary RGB camera init failed: %s", exc)
 
     if sidecar_cfg is not None:
         if sidecar_cfg is primary_cfg:
-            sidecar_camera = primary_camera
+            if primary_camera is not None:
+                sidecar_camera = primary_camera
+            else:
+                try:
+                    sidecar_camera = get_camera(sidecar_cfg, enable_depth=enable_depth)
+                    primary_camera = sidecar_camera
+                    primary_error = None
+                except Exception as exc:
+                    sidecar_error = str(exc)
+                    logger.warning("Sidecar depth/IMU camera init failed: %s", exc)
         else:
-            sidecar_camera = get_camera(sidecar_cfg, enable_depth=enable_depth)
+            try:
+                sidecar_camera = get_camera(sidecar_cfg, enable_depth=enable_depth)
+            except Exception as exc:
+                sidecar_error = str(exc)
+                logger.warning("Sidecar depth/IMU camera init failed: %s", exc)
 
     if rear_cfg is not None:
-        rear_camera = get_camera(rear_cfg, enable_depth=False)
+        try:
+            rear_camera = get_camera(rear_cfg, enable_depth=False)
+        except Exception as exc:
+            rear_error = str(exc)
+            logger.warning("Rear preview camera init failed: %s", exc)
 
     depth_aligned_to_primary = bool(
         primary_camera is not None
@@ -609,9 +764,12 @@ def build_sensor_rig(camera_configs, enable_depth=True):
     return CompositeSensorRig(
         primary_rgb_camera=primary_camera,
         primary_rgb_config=primary_cfg,
+        primary_rgb_error=primary_error,
         sidecar_depth_imu_sensor=sidecar_camera,
         sidecar_depth_imu_config=sidecar_cfg,
+        sidecar_depth_imu_error=sidecar_error,
         rear_preview_camera=rear_camera,
         rear_preview_config=rear_cfg,
+        rear_preview_error=rear_error,
         depth_aligned_to_primary=depth_aligned_to_primary,
     )

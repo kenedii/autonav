@@ -93,6 +93,28 @@ Recommended camera config shape:
 ]
 ```
 
+Example Jetson smoke-test config:
+
+- [docs/examples/client_config_cam0_primary.json](docs/examples/client_config_cam0_primary.json)
+
+Jetson smoke-test checklist:
+
+- [docs/jetson_smoke_test.md](docs/jetson_smoke_test.md)
+
+## Jetson Smoke-Test Validation
+
+Use the checked-in CAM0-primary example config and the smoke-test checklist when validating the split on real hardware.
+
+1. Start the host dashboard and Jetson client using the standard existing entrypoints.
+2. Apply [docs/examples/client_config_cam0_primary.json](docs/examples/client_config_cam0_primary.json) to confirm CAM0 is primary RGB, RealSense is sidecar depth/IMU, and CAM1 is rear-only scaffolding.
+3. Verify `/status` and the dashboard show:
+   - `CAM0 Forward Preview`
+   - primary RGB health
+   - sidecar depth/IMU health
+   - rear preview disabled or unavailable
+   - explicit `tag_detector_status`, `control_model_status`, `depth_status`, and `stop_reason`
+4. Use [docs/jetson_smoke_test.md](docs/jetson_smoke_test.md) for the full checklist, including missing-CAM0 and missing-depth fallback checks.
+
 ## Development Workflow
 
 Use Git as the source of truth for source changes and treat the Jetson as a

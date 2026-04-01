@@ -75,6 +75,13 @@ class CarClient(object):
         self.last_depth_frame_ts = None
         self._last_mission_log_key = None
         self._last_camera_warning_ts = 0.0
+        self._sensor_health = {
+            "primary_rgb": None,
+            "depth": None,
+            "imu": None,
+            "rear": None,
+        }
+        self._depth_loss_active = False
 
         self.STEERING_CHANNEL = 0
         self.THROTTLE_CHANNEL = 1
@@ -167,6 +174,13 @@ class CarClient(object):
             self.last_depth_frame_ts = None
             self._last_mission_log_key = None
             self.state["sensors"] = empty_sensor_snapshot()
+            self._sensor_health = {
+                "primary_rgb": None,
+                "depth": None,
+                "imu": None,
+                "rear": None,
+            }
+            self._depth_loss_active = False
             with self.latest_preview_lock:
                 self.latest_preview_jpeg = None
 
@@ -281,6 +295,21 @@ class CarClient(object):
             return
         self.pca.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
         self.pca.set_us(self.STEERING_CHANNEL, self.STEERING_CENTER)
+
+    def _log_sensor_transition(self, sensor_name, available, unavailable_message, recovery_message):
+        previous = self._sensor_health.get(sensor_name)
+        if previous is None:
+            self._sensor_health[sensor_name] = available
+            return
+        if previous == available:
+            return
+        self._sensor_health[sensor_name] = available
+        if available:
+            if recovery_message:
+                logger.info(recovery_message)
+        else:
+            if unavailable_message:
+                logger.warning(unavailable_message)
 
     def _apply_runtime_stop(self, reason, now_ts=None):
         if now_ts is None:
@@ -411,7 +440,8 @@ class CarClient(object):
 
         sensor_packet = {}
         if self.sensor_rig is not None:
-            sensor_packet = self.sensor_rig.read()
+            rear_enabled = bool((getattr(self.sensor_rig, "rear_preview_config", None) or {}).get("enabled", False))
+            sensor_packet = self.sensor_rig.read(include_rear=rear_enabled)
             self.state["sensors"] = sensor_packet.get("sensor_snapshot") or self.sensor_rig.snapshot()
         else:
             self.state["sensors"] = empty_sensor_snapshot()
@@ -422,6 +452,34 @@ class CarClient(object):
         depth_aligned_to_primary = bool(sensor_packet.get("depth_aligned_to_primary"))
         primary_sensor_state = (self.state.get("sensors") or {}).get("primary_rgb") or {}
         primary_configured = bool(primary_sensor_state.get("configured"))
+        depth_sensor_state = (self.state.get("sensors") or {}).get("depth") or {}
+        imu_sensor_state = (self.state.get("sensors") or {}).get("imu") or {}
+        rear_sensor_state = (self.state.get("sensors") or {}).get("rear") or {}
+        rear_enabled = bool(rear_sensor_state.get("enabled", False))
+        primary_available = bool(primary_sensor_state.get("frame_available")) and frame_color is not None
+        depth_available = bool(depth_sensor_state.get("depth_available")) and frame_depth is not None
+        imu_available = bool(imu_sensor_state.get("imu_available")) and bool(imu_data)
+        rear_available = bool(rear_sensor_state.get("frame_available"))
+
+        self._log_sensor_transition(
+            "primary_rgb",
+            primary_available,
+            "Primary RGB camera unavailable; neutralizing outputs.",
+            "Primary RGB camera recovered.",
+        )
+        self._log_sensor_transition(
+            "imu",
+            imu_available,
+            "RealSense IMU unavailable; continuing with last known context.",
+            "RealSense IMU recovered.",
+        )
+        if rear_enabled:
+            self._log_sensor_transition(
+                "rear",
+                rear_available,
+                "Rear preview camera unavailable; forward control unaffected.",
+                "Rear preview camera recovered.",
+            )
 
         if frame_color is None:
             if now_ts - self._last_camera_warning_ts > 2.0:
@@ -438,6 +496,9 @@ class CarClient(object):
 
         if frame_depth is not None:
             self.last_depth_frame_ts = now_ts
+            if self._depth_loss_active:
+                logger.info("RealSense depth recovered.")
+            self._depth_loss_active = False
 
         frame_bgr = cv2.cvtColor(frame_color, cv2.COLOR_RGB2BGR)
         detections = []
@@ -471,13 +532,13 @@ class CarClient(object):
                         error = target_theta - pose["theta"]
                         error = (error + math.pi) % (2 * math.pi) - math.pi
                         override_steer = float(np.clip(error * self.nav_kp, -1.0, 1.0))
-        elif imu_data:
+        else:
             loc = self.state.get("location") or {}
             if isinstance(loc, dict):
                 loc = dict(loc)
             else:
                 loc = {}
-            loc["imu"] = imu_data
+            loc["imu"] = imu_data or None
             self.state["location"] = loc
 
         obstacle_distance = None
@@ -489,11 +550,15 @@ class CarClient(object):
             else:
                 self.mission_manager.update_obstacle(None, now_ts)
                 if self.last_depth_frame_ts is None or (now_ts - self.last_depth_frame_ts) > 0.5:
+                    if not self._depth_loss_active:
+                        logger.warning("RealSense depth missing beyond grace window; stopping autonomy.")
+                        self._depth_loss_active = True
                     self.mission_manager.stop("depth_unavailable", now_ts)
                     force_zero_throttle = True
         else:
             self.front_obstacle_distance_m = None
             self.mission_manager.set_depth_status("disabled")
+            self._depth_loss_active = False
 
         if self.tag_detector is not None:
             self.mission_manager.set_tag_detector_status(
