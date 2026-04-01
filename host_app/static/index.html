@@ -82,20 +82,36 @@
                                 <div class="operator-main">
                                     <div class="preview-panel control-group">
                                         <div class="panel-heading">
-                                            <h3>Live Preview</h3>
+                                            <div>
+                                                <h3>CAM0 Forward Preview</h3>
+                                                <p class="panel-subtitle">Forward control, AprilTags, and preview all use CAM0.</p>
+                                            </div>
                                             <div class="badge-row">
                                                 <span class="status-badge" id="mission-state-badge">IDLE</span>
                                                 <span class="status-badge neutral" id="stop-reason-badge">No stop reason</span>
                                             </div>
                                         </div>
                                         <div class="preview-frame">
-                                            <img id="live-preview" alt="Live preview" />
-                                            <div class="preview-placeholder" id="preview-placeholder">Preview will appear when the car is selected.</div>
+                                            <img id="live-preview" alt="CAM0 forward preview" />
+                                            <div class="preview-placeholder" id="preview-placeholder">CAM0 forward preview will appear when the car is selected.</div>
                                         </div>
                                         <div class="preview-meta">
                                             <div><strong>Mission:</strong> <span id="mission-route">expo_route</span></div>
                                             <div><strong>Vehicle:</strong> <span id="detail-activity">Idle</span></div>
                                             <div><strong>FPS:</strong> <span id="detail-fps">0</span></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="control-group sensor-panel">
+                                        <div class="panel-heading">
+                                            <div>
+                                                <h3>Sensor Roles</h3>
+                                                <p class="panel-subtitle">CAM0 drives forward control. RealSense stays sidecar-only.</p>
+                                            </div>
+                                            <span class="status-badge neutral" id="forward-preview-role-badge">CAM0</span>
+                                        </div>
+                                        <div id="sensor-rig-panel" class="sensor-rig-grid">
+                                            <!-- Populated by JS -->
                                         </div>
                                     </div>
 
@@ -236,16 +252,66 @@
             <h3>Edit Car Configuration</h3>
             <div class="scroll-form" style="max-height: 60vh; overflow-y: auto; margin-bottom: 1rem;">
                 
-                <h4>Camera</h4>
-                <div class="form-row"><label>Type:</label>
-                    <select id="cfg-cam-type">
-                        <option value="opencv">OpenCV</option>
-                        <option value="realsense">RealSense</option>
-                    </select>
+                <h4>Camera Roles</h4>
+                <div class="role-grid">
+                    <div class="camera-role-card" data-role="primary_rgb">
+                        <div class="role-header">
+                            <h5>CAM0 Primary RGB</h5>
+                            <span class="status-badge ok">forward</span>
+                        </div>
+                        <div class="form-row"><label>Enabled:</label><input type="checkbox" id="cfg-primary-enabled" checked></div>
+                        <div class="form-row"><label>Type:</label>
+                            <select id="cfg-primary-type">
+                                <option value="csi">CSI</option>
+                                <option value="opencv">OpenCV</option>
+                                <option value="realsense">RealSense</option>
+                            </select>
+                        </div>
+                        <div class="form-row"><label>Sensor ID:</label><input type="number" id="cfg-primary-sensor-id" value="0"></div>
+                        <div class="form-row"><label>Width:</label><input type="number" id="cfg-primary-w" value="640"></div>
+                        <div class="form-row"><label>Height:</label><input type="number" id="cfg-primary-h" value="480"></div>
+                        <div class="form-row"><label>FPS:</label><input type="number" id="cfg-primary-fps" value="15"></div>
+                        <div class="form-row"><label>Flip Method:</label><input type="number" id="cfg-primary-flip" value="2"></div>
+                    </div>
+
+                    <div class="camera-role-card" data-role="sidecar_depth_imu">
+                        <div class="role-header">
+                            <h5>RealSense Sidecar Depth/IMU</h5>
+                            <span class="status-badge neutral">sidecar</span>
+                        </div>
+                        <div class="form-row"><label>Enabled:</label><input type="checkbox" id="cfg-sidecar-enabled" checked></div>
+                        <div class="form-row"><label>Type:</label>
+                            <select id="cfg-sidecar-type">
+                                <option value="realsense">RealSense</option>
+                                <option value="csi">CSI</option>
+                                <option value="opencv">OpenCV</option>
+                            </select>
+                        </div>
+                        <div class="form-row"><label>Width:</label><input type="number" id="cfg-sidecar-w" value="640"></div>
+                        <div class="form-row"><label>Height:</label><input type="number" id="cfg-sidecar-h" value="480"></div>
+                        <div class="form-row"><label>FPS:</label><input type="number" id="cfg-sidecar-fps" value="15"></div>
+                    </div>
+
+                    <div class="camera-role-card" data-role="rear_preview">
+                        <div class="role-header">
+                            <h5>CAM1 Rear Preview</h5>
+                            <span class="status-badge neutral">reverse-only</span>
+                        </div>
+                        <div class="form-row"><label>Enabled:</label><input type="checkbox" id="cfg-rear-enabled"></div>
+                        <div class="form-row"><label>Type:</label>
+                            <select id="cfg-rear-type">
+                                <option value="csi">CSI</option>
+                                <option value="opencv">OpenCV</option>
+                                <option value="realsense">RealSense</option>
+                            </select>
+                        </div>
+                        <div class="form-row"><label>Sensor ID:</label><input type="number" id="cfg-rear-sensor-id" value="1"></div>
+                        <div class="form-row"><label>Width:</label><input type="number" id="cfg-rear-w" value="640"></div>
+                        <div class="form-row"><label>Height:</label><input type="number" id="cfg-rear-h" value="480"></div>
+                        <div class="form-row"><label>FPS:</label><input type="number" id="cfg-rear-fps" value="15"></div>
+                        <div class="form-row"><label>Flip Method:</label><input type="number" id="cfg-rear-flip" value="2"></div>
+                    </div>
                 </div>
-                 <div class="form-row"><label>Width:</label><input type="number" id="cfg-cam-w" value="640"></div>
-                 <div class="form-row"><label>Height:</label><input type="number" id="cfg-cam-h" value="480"></div>
-                 <div class="form-row"><label>FPS:</label><input type="number" id="cfg-cam-fps" value="30"></div>
                  
                  <h4>Models</h4>
                  <div class="form-row"><label>Control Backend:</label>

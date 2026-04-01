@@ -9,6 +9,8 @@ class AprilTagDetector(object):
         self._dictionary = None
         self._parameters = None
         self._detector = None
+        self._max_working_width = 640
+        self._minimum_area_ratio = 0.0008
 
         try:
             aruco = getattr(cv2, "aruco", None)
@@ -44,10 +46,19 @@ class AprilTagDetector(object):
             return []
 
         try:
+            scale = 1.0
+            working = frame_bgr
+            if len(frame_bgr.shape) == 3 and frame_bgr.shape[1] > self._max_working_width:
+                scale = float(self._max_working_width) / float(frame_bgr.shape[1])
+                working = cv2.resize(
+                    frame_bgr,
+                    (self._max_working_width, int(frame_bgr.shape[0] * scale)),
+                )
             if len(frame_bgr.shape) == 3:
-                gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                gray = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY)
             else:
-                gray = frame_bgr
+                gray = working
+            gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
             if self._detector is not None:
                 corners, ids, _ = self._detector.detectMarkers(gray)
@@ -63,12 +74,15 @@ class AprilTagDetector(object):
                 return results
 
             for marker_corners, marker_id in zip(corners, ids.flatten().tolist()):
+                area = abs(cv2.contourArea(marker_corners.astype("float32")))
+                if area < (gray.shape[0] * gray.shape[1] * self._minimum_area_ratio):
+                    continue
                 pts = []
                 cx = 0.0
                 cy = 0.0
                 for point in marker_corners[0]:
-                    px = float(point[0])
-                    py = float(point[1])
+                    px = float(point[0] / scale)
+                    py = float(point[1] / scale)
                     pts.append([px, py])
                     cx += px
                     cy += py

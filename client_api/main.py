@@ -162,10 +162,14 @@ def _build_state_payload():
 
 class CameraConfig(BaseModel):
     type: str
+    role: Optional[str] = None
+    enabled: Optional[bool] = True
     index: Optional[int] = 0
+    sensor_id: Optional[int] = 0
     width: Optional[int] = 640
     height: Optional[int] = 480
     fps: Optional[int] = 30
+    flip_method: Optional[int] = 0
 
 
 class ClientConfig(BaseModel):
@@ -177,6 +181,7 @@ class ClientConfig(BaseModel):
     detection_model: Optional[str] = None
     throttle_mode: str = "fixed"
     fixed_throttle_value: float = 0.22
+    preprocess_profile: Optional[str] = None
     action_loop: List[str] = ["control", "detection", "api"]
     mission: Optional[Dict[str, Any]] = None
     ip: str = "0.0.0.0"

@@ -71,6 +71,20 @@ def test_obstacle_threshold_forces_fault_stop():
     assert snapshot["stop_reason"] == "obstacle"
 
 
+def test_missing_depth_marks_depth_unavailable_without_faulting():
+    mission = MissionManager({"enabled": True, "depth_stop": {"enabled": True}})
+    mission.start()
+
+    stopped = mission.update_obstacle(None)
+    snapshot = mission.snapshot()
+
+    assert stopped is False
+    assert snapshot["depth_status"] == "unavailable"
+    assert snapshot["obstacle_distance_m"] is None
+    assert snapshot["stop_reason"] is None
+    assert snapshot["state"] == "RUNNING"
+
+
 def test_disabled_mission_is_neutral_and_json_safe():
     mission = MissionManager({"enabled": False})
 

@@ -3,22 +3,31 @@ import os
 import threading
 import time
 import logging
+import sys
 
 import cv2
 import numpy as np
 
 try:
-    from .hardware import PCA9685, get_camera, get_system_specs
+    from .hardware import PCA9685, build_sensor_rig, empty_sensor_snapshot, get_system_specs
     from .models import AutonomousDriver, ObjectDetector
     from .slam import VisualSlamSystem
     from .mission import MissionManager
     from .tag_detector import AprilTagDetector
 except ImportError:
-    from hardware import PCA9685, get_camera, get_system_specs
+    from hardware import PCA9685, build_sensor_rig, empty_sensor_snapshot, get_system_specs
     from models import AutonomousDriver, ObjectDetector
     from slam import VisualSlamSystem
     from mission import MissionManager
     from tag_detector import AprilTagDetector
+
+try:
+    from preprocess_utils import infer_preprocess_profile
+except ImportError:
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if parent_dir not in sys.path:
+        sys.path.append(parent_dir)
+    from preprocess_utils import infer_preprocess_profile
 
 
 logger = logging.getLogger("CarClient")
@@ -37,6 +46,7 @@ class CarClient(object):
             "detections": [],
             "specs": {},
             "mission": {},
+            "sensors": empty_sensor_snapshot(),
         }
 
         try:
@@ -44,7 +54,7 @@ class CarClient(object):
         except Exception as exc:
             logger.warning("Failed to get system specs: %s", exc)
 
-        self.camera = None
+        self.sensor_rig = None
         self.pca = None
         self.control_model = None
         self.detection_model = None
@@ -122,6 +132,10 @@ class CarClient(object):
                 config["detection_model"] = os.path.expanduser(config["detection_model"])
             if config.get("fixed_throttle_value") is not None:
                 self.fixed_throttle = float(config["fixed_throttle_value"])
+            config["preprocess_profile"] = infer_preprocess_profile(
+                config.get("cameras"),
+                config.get("preprocess_profile"),
+            )
 
             self.action_loop = config.get("action_loop") or ["control", "api"]
 
@@ -135,12 +149,12 @@ class CarClient(object):
             except Exception as exc:
                 logger.warning("Error updating specs: %s", exc)
 
-            if self.camera:
+            if self.sensor_rig:
                 try:
-                    self.camera.release()
+                    self.sensor_rig.release()
                 except Exception:
                     pass
-                self.camera = None
+                self.sensor_rig = None
 
             self.config = config
             self.paused = False
@@ -152,6 +166,7 @@ class CarClient(object):
             self.last_tag_detections = []
             self.last_depth_frame_ts = None
             self._last_mission_log_key = None
+            self.state["sensors"] = empty_sensor_snapshot()
             with self.latest_preview_lock:
                 self.latest_preview_jpeg = None
 
@@ -175,13 +190,14 @@ class CarClient(object):
                 bool(self.mission_manager.depth_stop.get("enabled"))
             )
             try:
-                if config.get("cameras"):
-                    self.camera = get_camera(config["cameras"][0], enable_depth=need_depth)
-                if self.camera is None:
-                    logger.warning("Camera initialization returned None")
+                self.sensor_rig = build_sensor_rig(config.get("cameras") or [], enable_depth=need_depth)
+                self.state["sensors"] = self.sensor_rig.snapshot()
+                if not self.sensor_rig.primary_rgb_camera:
+                    logger.warning("Primary RGB camera initialization returned None")
             except Exception as exc:
-                logger.error("Failed to init Camera: %s", exc)
-                self.camera = None
+                logger.error("Failed to init sensor rig: %s", exc)
+                self.sensor_rig = None
+                self.state["sensors"] = empty_sensor_snapshot()
 
             try:
                 self.control_model = None
@@ -191,7 +207,7 @@ class CarClient(object):
                 if "detection" in self.action_loop and config.get("detection_model"):
                     self.detection_model = ObjectDetector(config)
                 if "slam" in self.action_loop:
-                    cam_cfg = config.get("cameras", [{}])[0]
+                    cam_cfg = (self.state["sensors"].get("primary_rgb") or {}) if isinstance(self.state.get("sensors"), dict) else {}
                     self.slam = VisualSlamSystem(
                         width=cam_cfg.get("width", 640),
                         height=cam_cfg.get("height", 480),
@@ -233,13 +249,12 @@ class CarClient(object):
         if self.thread:
             self.thread.join(timeout=2.0)
 
-        if self.pca:
-            self.pca.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
-            self.pca.set_us(self.STEERING_CHANNEL, self.STEERING_CENTER)
+        self._neutralize_outputs()
 
-        if self.camera:
-            self.camera.release()
-            self.camera = None
+        if self.sensor_rig:
+            self.sensor_rig.release()
+            self.sensor_rig = None
+            self.state["sensors"] = empty_sensor_snapshot()
 
         self.mission_manager.stop("operator_stop")
         self.state["last_action"] = {"steer": 0.0, "throttle": 0.0}
@@ -260,6 +275,20 @@ class CarClient(object):
         self.paused = False
         self.pause_until = 0
         logger.info("Resumed")
+
+    def _neutralize_outputs(self):
+        if not self.pca:
+            return
+        self.pca.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
+        self.pca.set_us(self.STEERING_CHANNEL, self.STEERING_CENTER)
+
+    def _apply_runtime_stop(self, reason, now_ts=None):
+        if now_ts is None:
+            now_ts = time.time()
+        self.mission_manager.stop(reason, now_ts)
+        self.state["last_action"] = {"steer": 0.0, "throttle": 0.0}
+        self._neutralize_outputs()
+        self._publish_mission_state()
 
     def get_latest_preview_jpeg(self):
         with self.latest_preview_lock:
@@ -376,6 +405,173 @@ class CarClient(object):
             self._last_mission_log_key = key
         return snapshot
 
+    def _step_once(self, frame_count, now_ts=None):
+        if now_ts is None:
+            now_ts = time.time()
+
+        sensor_packet = {}
+        if self.sensor_rig is not None:
+            sensor_packet = self.sensor_rig.read()
+            self.state["sensors"] = sensor_packet.get("sensor_snapshot") or self.sensor_rig.snapshot()
+        else:
+            self.state["sensors"] = empty_sensor_snapshot()
+
+        frame_color = sensor_packet.get("primary_rgb")
+        frame_depth = sensor_packet.get("depth")
+        imu_data = sensor_packet.get("imu") or {}
+        depth_aligned_to_primary = bool(sensor_packet.get("depth_aligned_to_primary"))
+        primary_sensor_state = (self.state.get("sensors") or {}).get("primary_rgb") or {}
+        primary_configured = bool(primary_sensor_state.get("configured"))
+
+        if frame_color is None:
+            if now_ts - self._last_camera_warning_ts > 2.0:
+                if self.sensor_rig is None or not primary_configured:
+                    logger.warning("No primary RGB camera configured! Waiting for configuration...")
+                else:
+                    logger.warning("Primary RGB camera unavailable; neutralizing outputs.")
+                self._last_camera_warning_ts = now_ts
+            self.state["detections"] = []
+            self.front_obstacle_distance_m = None
+            self._apply_runtime_stop("primary_rgb_unavailable", now_ts)
+            time.sleep(0.05 if primary_configured else 2.0)
+            return False
+
+        if frame_depth is not None:
+            self.last_depth_frame_ts = now_ts
+
+        frame_bgr = cv2.cvtColor(frame_color, cv2.COLOR_RGB2BGR)
+        detections = []
+        tag_detections = []
+        override_steer = None
+        force_zero_throttle = False
+
+        slam_depth = frame_depth if depth_aligned_to_primary else None
+        if self.slam is not None:
+            pose = self.slam.update(
+                frame_color,
+                slam_depth,
+                throttle_val=self.fixed_throttle,
+                imu_data=imu_data,
+            )
+            if isinstance(pose, dict):
+                pose = dict(pose)
+                if imu_data:
+                    pose["imu"] = imu_data
+                self.state["location"] = pose
+                if self.target_dest:
+                    dx = self.target_dest[0] - pose["x"]
+                    dy = self.target_dest[1] - pose["y"]
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    if dist < 0.2:
+                        logger.info("Nav: Reached destination %s", self.target_dest)
+                        self.target_dest = None
+                        override_steer = 0.0
+                    else:
+                        target_theta = math.atan2(dy, dx)
+                        error = target_theta - pose["theta"]
+                        error = (error + math.pi) % (2 * math.pi) - math.pi
+                        override_steer = float(np.clip(error * self.nav_kp, -1.0, 1.0))
+        elif imu_data:
+            loc = self.state.get("location") or {}
+            if isinstance(loc, dict):
+                loc = dict(loc)
+            else:
+                loc = {}
+            loc["imu"] = imu_data
+            self.state["location"] = loc
+
+        obstacle_distance = None
+        if self.mission_manager.depth_stop.get("enabled"):
+            obstacle_distance = self._estimate_front_obstacle_distance_m(frame_depth)
+            self.front_obstacle_distance_m = obstacle_distance
+            if obstacle_distance is not None:
+                self.mission_manager.update_obstacle(obstacle_distance, now_ts)
+            else:
+                self.mission_manager.update_obstacle(None, now_ts)
+                if self.last_depth_frame_ts is None or (now_ts - self.last_depth_frame_ts) > 0.5:
+                    self.mission_manager.stop("depth_unavailable", now_ts)
+                    force_zero_throttle = True
+        else:
+            self.front_obstacle_distance_m = None
+            self.mission_manager.set_depth_status("disabled")
+
+        if self.tag_detector is not None:
+            self.mission_manager.set_tag_detector_status(
+                self.tag_detector.status if self.mission_manager.enabled else "disabled"
+            )
+            tag_every = self.mission_manager.tag_detect_every_n_frames
+            if self.mission_manager.enabled and self.tag_detector.available and frame_count % tag_every == 0:
+                tag_detections = self.tag_detector.detect(frame_bgr)
+                self.last_tag_detections = tag_detections
+            elif frame_count % max(1, self.mission_manager.tag_detect_every_n_frames) == 0:
+                self.last_tag_detections = []
+            tag_detections = list(self.last_tag_detections)
+            detected_tag_ids = [tag["id"] for tag in tag_detections]
+            for tag_id in self.mission_manager.consume_tags(detected_tag_ids, now_ts):
+                logger.info("Mission tag seen: %s", tag_id)
+
+        if "detection" in self.action_loop and self.detection_model is not None:
+            detections = self.detection_model.detect(frame_color) or []
+            if depth_aligned_to_primary and frame_depth is not None:
+                for detection in detections:
+                    bbox = detection.get("bbox") or []
+                    if len(bbox) != 4:
+                        continue
+                    x1, y1, x2, y2 = [int(v) for v in bbox]
+                    x1 = max(0, x1)
+                    y1 = max(0, y1)
+                    x2 = min(frame_depth.shape[1], x2)
+                    y2 = min(frame_depth.shape[0], y2)
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    crop = frame_depth[y1:y2, x1:x2]
+                    valid_depths = crop[crop > 0]
+                    if valid_depths.size > 0:
+                        detection["distance"] = float(np.mean(valid_depths)) / 1000.0
+        self.state["detections"] = detections
+
+        if self.control_model is None:
+            self.mission_manager.set_control_model_status("unavailable")
+            self.mission_manager.stop("model_unavailable", now_ts)
+            steer_norm = 0.0
+            force_zero_throttle = True
+        else:
+            self.mission_manager.set_control_model_status("available")
+            if override_steer is not None:
+                steer_norm = float(override_steer)
+            else:
+                steer_norm = float(self.control_model.predict(frame_color))
+
+        steer_norm = float(np.clip(steer_norm, -1.0, 1.0))
+        current_throttle = self.mission_manager.compute_throttle(self.fixed_throttle, abs(steer_norm))
+        if force_zero_throttle:
+            current_throttle = 0.0
+
+        pulse = int(self.STEERING_CENTER + (steer_norm * 500))
+        pulse = int(np.clip(pulse, 1000, 2000))
+        throttle_us = self.THROTTLE_CENTER + int(
+            current_throttle * (self.THROTTLE_MAX - self.THROTTLE_CENTER)
+        )
+
+        if self.pca:
+            self.pca.set_us(self.STEERING_CHANNEL, pulse)
+            self.pca.set_us(self.THROTTLE_CHANNEL, throttle_us)
+
+        self.state["last_action"] = {
+            "steer": float(steer_norm),
+            "throttle": float(current_throttle),
+        }
+
+        mission_snapshot = self._publish_mission_state()
+        self._update_preview(
+            frame_bgr,
+            mission_snapshot,
+            tag_detections,
+            obstacle_distance,
+            self.state["last_action"],
+        )
+        return True
+
     def _loop(self):
         frame_count = 0
         fps_counter = 0
@@ -394,149 +590,9 @@ class CarClient(object):
                     time.sleep(0.1)
                     continue
 
-            frame_color = None
-            frame_depth = None
-            imu_data = None
-            if self.camera:
-                frame_color, frame_depth, imu_data = self.camera.read()
-
-            if frame_color is None:
-                if now_ts - self._last_camera_warning_ts > 2.0:
-                    if not self.camera:
-                        logger.warning("No camera configured! Waiting for configuration...")
-                    self._last_camera_warning_ts = now_ts
-                time.sleep(0.05 if self.camera else 2.0)
-                continue
-
-            if imu_data is None:
-                imu_data = {}
-
-            if frame_depth is not None:
-                self.last_depth_frame_ts = now_ts
-
-            frame_bgr = cv2.cvtColor(frame_color, cv2.COLOR_RGB2BGR)
-            detections = []
-            tag_detections = []
-            override_steer = None
-
-            if self.slam is not None:
-                pose = self.slam.update(frame_color, frame_depth, throttle_val=self.fixed_throttle, imu_data=imu_data)
-                if isinstance(pose, dict):
-                    pose = dict(pose)
-                    if imu_data:
-                        pose["imu"] = imu_data
-                    self.state["location"] = pose
-                    if self.target_dest:
-                        dx = self.target_dest[0] - pose["x"]
-                        dy = self.target_dest[1] - pose["y"]
-                        dist = math.sqrt(dx * dx + dy * dy)
-                        if dist < 0.2:
-                            logger.info("Nav: Reached destination %s", self.target_dest)
-                            self.target_dest = None
-                            override_steer = 0.0
-                        else:
-                            target_theta = math.atan2(dy, dx)
-                            error = target_theta - pose["theta"]
-                            error = (error + math.pi) % (2 * math.pi) - math.pi
-                            override_steer = float(np.clip(error * self.nav_kp, -1.0, 1.0))
-            elif imu_data:
-                loc = self.state.get("location") or {}
-                if isinstance(loc, dict):
-                    loc = dict(loc)
-                else:
-                    loc = {}
-                loc["imu"] = imu_data
-                self.state["location"] = loc
-
-            obstacle_distance = None
-            if self.mission_manager.depth_stop.get("enabled"):
-                obstacle_distance = self._estimate_front_obstacle_distance_m(frame_depth)
-                self.front_obstacle_distance_m = obstacle_distance
-                if obstacle_distance is not None:
-                    self.mission_manager.update_obstacle(obstacle_distance, now_ts)
-                else:
-                    self.mission_manager.update_obstacle(None, now_ts)
-                    if self.last_depth_frame_ts is None or (now_ts - self.last_depth_frame_ts) > 0.5:
-                        self.mission_manager.stop("depth_unavailable", now_ts)
-            else:
-                self.front_obstacle_distance_m = None
-                self.mission_manager.set_depth_status("disabled")
-
-            if self.tag_detector is not None:
-                self.mission_manager.set_tag_detector_status(
-                    self.tag_detector.status if self.mission_manager.enabled else "disabled"
-                )
-                tag_every = self.mission_manager.tag_detect_every_n_frames
-                if self.mission_manager.enabled and self.tag_detector.available and frame_count % tag_every == 0:
-                    tag_detections = self.tag_detector.detect(frame_bgr)
-                    self.last_tag_detections = tag_detections
-                elif frame_count % max(1, self.mission_manager.tag_detect_every_n_frames) == 0:
-                    self.last_tag_detections = []
-                tag_detections = list(self.last_tag_detections)
-                detected_tag_ids = [tag["id"] for tag in tag_detections]
-                for tag_id in self.mission_manager.consume_tags(detected_tag_ids, now_ts):
-                    logger.info("Mission tag seen: %s", tag_id)
-
-            if "detection" in self.action_loop and self.detection_model is not None:
-                detections = self.detection_model.detect(frame_color) or []
-                if frame_depth is not None:
-                    for detection in detections:
-                        bbox = detection.get("bbox") or []
-                        if len(bbox) != 4:
-                            continue
-                        x1, y1, x2, y2 = [int(v) for v in bbox]
-                        x1 = max(0, x1)
-                        y1 = max(0, y1)
-                        x2 = min(frame_depth.shape[1], x2)
-                        y2 = min(frame_depth.shape[0], y2)
-                        if x2 <= x1 or y2 <= y1:
-                            continue
-                        crop = frame_depth[y1:y2, x1:x2]
-                        valid_depths = crop[crop > 0]
-                        if valid_depths.size > 0:
-                            detection["distance"] = float(np.mean(valid_depths)) / 1000.0
-            self.state["detections"] = detections
-
-            if self.control_model is None:
-                self.mission_manager.set_control_model_status("unavailable")
-                self.mission_manager.stop("model_unavailable", now_ts)
-                steer_norm = 0.0
-            else:
-                self.mission_manager.set_control_model_status("available")
-                if override_steer is not None:
-                    steer_norm = float(override_steer)
-                else:
-                    steer_norm = float(self.control_model.predict(frame_color))
-
-            steer_norm = float(np.clip(steer_norm, -1.0, 1.0))
-            current_throttle = self.mission_manager.compute_throttle(self.fixed_throttle, abs(steer_norm))
-
-            pulse = int(self.STEERING_CENTER + (steer_norm * 500))
-            pulse = int(np.clip(pulse, 1000, 2000))
-            throttle_us = self.THROTTLE_CENTER + int(
-                current_throttle * (self.THROTTLE_MAX - self.THROTTLE_CENTER)
-            )
-
-            if self.pca:
-                self.pca.set_us(self.STEERING_CHANNEL, pulse)
-                self.pca.set_us(self.THROTTLE_CHANNEL, throttle_us)
-
-            self.state["last_action"] = {
-                "steer": float(steer_norm),
-                "throttle": float(current_throttle),
-            }
-
-            mission_snapshot = self._publish_mission_state()
-            self._update_preview(
-                frame_bgr,
-                mission_snapshot,
-                tag_detections,
-                obstacle_distance,
-                self.state["last_action"],
-            )
-
-            fps_counter += 1
-            frame_count += 1
+            if self._step_once(frame_count, now_ts=now_ts):
+                fps_counter += 1
+                frame_count += 1
             if now_ts - last_fps_time >= 1.0:
                 self.state["fps"] = fps_counter
                 fps_counter = 0

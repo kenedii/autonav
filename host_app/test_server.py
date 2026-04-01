@@ -10,9 +10,22 @@ def test_add_test_client():
     data = response.json()
     assert data["status"] == "added"
     assert "id" in data
-    
+
     # Check if logs were seeded
     client_id = data["id"]
+    car_resp = client.get("/api/cars")
+    assert car_resp.status_code == 200
+    car = next(item for item in car_resp.json() if item["id"] == client_id)
+    sensors = car["details"]["state"]["sensors"]
+    assert sensors["forward_preview_role"] == "primary_rgb"
+    assert sensors["primary_rgb"]["role"] == "primary_rgb"
+    assert sensors["sidecar_depth_imu"]["role"] == "sidecar_depth_imu"
+    assert sensors["rear_preview"]["role"] == "rear_preview"
+    assert car["details"]["config"]["cameras"][0]["role"] == "primary_rgb"
+    assert car["details"]["config"]["preprocess_profile"] == "cam0_fisheye_v1"
+    assert car["details"]["state"]["location"]["imu"]["accel"] == [0.01, -0.02, 0.98]
+    assert car["details"]["state"]["specs"]["cameras"][1]["role"] == "sidecar_depth_imu"
+
     logs_resp = client.get(f"/api/cars/{client_id}/logs")
     assert logs_resp.status_code == 200
     logs_data = logs_resp.json()
@@ -52,6 +65,13 @@ def test_safe_car_redacts_passwords():
             "config": {
                 "password": "nested-secret",
                 "route_name": "expo_route",
+                "cameras": [{"role": "primary_rgb", "type": "csi"}],
+            },
+            "state": {
+                "sensors": {
+                    "forward_preview_role": "primary_rgb",
+                    "primary_rgb": {"role": "primary_rgb", "status": "available"},
+                }
             }
         },
     }
@@ -62,6 +82,8 @@ def test_safe_car_redacts_passwords():
     assert "password" not in safe
     assert safe["details"]["config"]["route_name"] == "expo_route"
     assert "password" not in safe["details"]["config"]
+    assert safe["details"]["state"]["sensors"]["forward_preview_role"] == "primary_rgb"
+    assert safe["details"]["state"]["sensors"]["primary_rgb"]["role"] == "primary_rgb"
 
 
 def test_car_log_since_filters_incrementally():

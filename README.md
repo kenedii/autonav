@@ -1,16 +1,19 @@
 # Jetson Nano Racer – Autonomous RC Car with RealSense D435i
 
 This project deploys a deep learning lane-following model on an
-**NVIDIA Jetson Nano** mounted on a **LaTrax 1/18 RC car** using an
-**Intel RealSense D435i** depth camera. The model predicts steering
-commands from the RGB stream in real time; control is sent to the
-PCA9685 servo driver to steer the car.
+**NVIDIA Jetson Nano** mounted on a **LaTrax 1/18 RC car**. CAM0 is the
+primary forward RGB source for lane following and AprilTags, while the
+**Intel RealSense D435i** remains active as a sidecar for depth-stop and
+IMU context. CAM1 is reserved for rear-preview / reverse-only scaffolding.
+Steering commands are sent to the PCA9685 servo driver in real time.
 
 ## Hardware
 
 - Jetson Nano 4GB Developer Kit with ARM Cortex-A57 CPU, Ubuntu + JetPack
 - LaTrax Rally 1/18 RC car
-- Intel RealSense D435i (RGBD + IMU)
+- Intel RealSense D435i (sidecar depth + IMU)
+- Front CAM0 fisheye camera for primary forward RGB
+- Rear CAM1 camera for preview / reverse-only support
 - TP-Link TL-WN725N USB WiFi adapter
 - PCA9685 16-channel servo driver
 - Pololu 4-Channel RC Servo Multiplexer
@@ -33,7 +36,8 @@ PCA9685 servo driver to steer the car.
 - Data collection from teleoperated driving
 - ResNet-based steering model (PyTorch + TensorRT)
 - Autonomous lane following on indoor track
-- RealSense center-depth measurement for safety / debugging
+- CAM0 fisheye preview and lane-follow training pipeline
+- RealSense depth ROI measurement for safety / debugging
 - REST API for live predictions
 - Host dashboard for fleet/operator monitoring
 - Dockerfile support for deployment workflows
@@ -49,6 +53,45 @@ This repository also supports an expo-ready AutoNav slice layered on top of the 
 - Obstacle stops require a manual operator restart for safety
 - SLAM is not required for demo mode
 - If AprilTag support is unavailable at runtime, the car keeps lane following and reports tag detection as unavailable
+- CAM0 is the forward preview and primary training source in the recommended configuration
+- CAM1 does not participate in ordinary forward control
+- Legacy single-camera configs still work; role-based camera configs are preferred for new runs
+- The CAM0 training/inference profile is `cam0_fisheye_v1`; older RealSense RGB runs remain on the legacy resize path
+
+Recommended camera config shape:
+
+```json
+[
+  {
+    "role": "primary_rgb",
+    "type": "csi",
+    "sensor_id": 0,
+    "width": 640,
+    "height": 480,
+    "fps": 15,
+    "flip_method": 2,
+    "enabled": true
+  },
+  {
+    "role": "sidecar_depth_imu",
+    "type": "realsense",
+    "width": 640,
+    "height": 480,
+    "fps": 15,
+    "enabled": true
+  },
+  {
+    "role": "rear_preview",
+    "type": "csi",
+    "sensor_id": 1,
+    "width": 640,
+    "height": 480,
+    "fps": 15,
+    "flip_method": 2,
+    "enabled": false
+  }
+]
+```
 
 ## Development Workflow
 

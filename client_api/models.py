@@ -3,7 +3,23 @@ import torch.nn as nn
 from torchvision import models
 import numpy as np
 import os
-import cv2
+import sys
+
+try:
+    from preprocess_utils import (
+        LEGACY_PREPROCESS_PROFILE,
+        apply_preprocess_profile,
+        infer_preprocess_profile,
+    )
+except ImportError:
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if parent_dir not in sys.path:
+        sys.path.append(parent_dir)
+    from preprocess_utils import (
+        LEGACY_PREPROCESS_PROFILE,
+        apply_preprocess_profile,
+        infer_preprocess_profile,
+    )
 
 # Wrapper for RKNN
 class RKNNWrapper:
@@ -72,7 +88,11 @@ class AutonomousDriver:
         self.device = torch.device(config.get('device', 'cpu'))
         self.backend = config.get('control_model_type', 'pytorch')
         self.model_path = config.get('control_model')
-        self.architecture = config.get('architecture', 'resnet18') 
+        self.architecture = config.get('architecture', 'resnet18')
+        self.preprocess_profile = infer_preprocess_profile(
+            config.get("cameras"),
+            config.get("preprocess_profile"),
+        ) or LEGACY_PREPROCESS_PROFILE
         
         self.model = self._load_model()
         
@@ -116,15 +136,7 @@ class AutonomousDriver:
             return model
 
     def predict(self, frame):
-        # Preprocess
-        # Assuming frame is RGB HxW
-        # Speed up: only resize if dimensions differ from typical input
-        h, w = frame.shape[:2]
-        if w != 160 or h != 120:
-             img = cv2.resize(frame, (160, 120))
-        else:
-             img = frame
-
+        img = apply_preprocess_profile(frame, self.preprocess_profile)
         img = img.transpose(2, 0, 1) # HWC -> CHW
         
         if self.backend == 'rockchip':

@@ -65,6 +65,212 @@ function formatVector(vec) {
     return "X:" + Number(vec[0]).toFixed(2) + " Y:" + Number(vec[1]).toFixed(2) + " Z:" + Number(vec[2]).toFixed(2);
 }
 
+const SENSOR_ROLE_META = [
+    {
+        key: "primary_rgb",
+        title: "CAM0 Primary RGB",
+        subtitle: "Forward control, AprilTags, and preview.",
+    },
+    {
+        key: "sidecar_depth_imu",
+        title: "RealSense Sidecar Depth/IMU",
+        subtitle: "Depth stop and IMU context only.",
+    },
+    {
+        key: "rear_preview",
+        title: "CAM1 Rear Preview",
+        subtitle: "Reverse-only scaffolding.",
+    },
+];
+
+function sensorStatusText(sensor) {
+    if (!sensor) return "unconfigured";
+    if (sensor.status) return String(sensor.status);
+    if (sensor.healthy === false) return "degraded";
+    if (sensor.enabled === false) return "disabled";
+    return "available";
+}
+
+function sensorStatusKind(sensor) {
+    const status = sensorStatusText(sensor).toLowerCase();
+    if (status.includes("available") || status.includes("healthy") || status === "ok") {
+        return "ok";
+    }
+    if (status.includes("configured") || status.includes("standby") || status.includes("disabled") || status.includes("unconfigured")) {
+        return "neutral";
+    }
+    if (status.includes("warn") || status.includes("degraded")) {
+        return "warning";
+    }
+    return "danger";
+}
+
+function cameraSummary(camera) {
+    if (!camera) return "unconfigured";
+    const role = camera.role ? camera.role : "camera";
+    const type = camera.type ? String(camera.type).toUpperCase() : "UNKNOWN";
+    const size = camera.width && camera.height ? camera.width + "x" + camera.height : "n/a";
+    const fps = camera.fps ? camera.fps + " fps" : "n/a";
+    return role + " | " + type + " | " + size + " | " + fps;
+}
+
+function formatSensorDetail(sensor) {
+    if (!sensor) return [];
+    const lines = [];
+    if (sensor.source) lines.push("source " + sensor.source);
+    if (sensor.sensor_id !== undefined && sensor.sensor_id !== null) lines.push("sensor " + sensor.sensor_id);
+    if (sensor.flip_method !== undefined && sensor.flip_method !== null) lines.push("flip " + sensor.flip_method);
+    if (sensor.depth) lines.push("depth " + sensor.depth);
+    if (sensor.imu) lines.push("imu " + sensor.imu);
+    if (sensor.healthy !== undefined) lines.push("healthy " + formatBool(sensor.healthy));
+    if (sensor.enabled !== undefined) lines.push("enabled " + formatBool(sensor.enabled));
+    return lines;
+}
+
+function renderSensorRig(sensorRig) {
+    const panel = document.getElementById("sensor-rig-panel");
+    if (!panel) return;
+    panel.innerHTML = "";
+
+    const rig = sensorRig || {};
+    const forwardRole = rig.forward_preview_role || "primary_rgb";
+    const forwardLabel = forwardRole === "primary_rgb" ? "CAM0" : forwardRole;
+    setBadge("forward-preview-role-badge", forwardLabel, forwardRole === "primary_rgb" ? "ok" : "neutral");
+
+    SENSOR_ROLE_META.forEach(function (meta) {
+        const sensor = rig[meta.key] || {};
+        const card = document.createElement("article");
+        card.className = "sensor-card";
+
+        const header = document.createElement("div");
+        header.className = "sensor-card-header";
+
+        const titleWrap = document.createElement("div");
+        const title = document.createElement("h4");
+        title.textContent = meta.title;
+        const subtitle = document.createElement("p");
+        subtitle.className = "sensor-card-subtitle";
+        subtitle.textContent = meta.subtitle;
+        titleWrap.appendChild(title);
+        titleWrap.appendChild(subtitle);
+
+        const badge = document.createElement("span");
+        badge.className = "status-badge " + sensorStatusKind(sensor);
+        badge.textContent = sensorStatusText(sensor);
+
+        header.appendChild(titleWrap);
+        header.appendChild(badge);
+
+        const summary = document.createElement("p");
+        summary.className = "sensor-card-summary";
+        summary.textContent = cameraSummary(sensor);
+
+        const metaList = document.createElement("div");
+        metaList.className = "sensor-meta";
+        formatSensorDetail(sensor).forEach(function (line) {
+            const row = document.createElement("div");
+            row.className = "sensor-meta-row";
+            row.textContent = line;
+            metaList.appendChild(row);
+        });
+        if (!metaList.children.length) {
+            const row = document.createElement("div");
+            row.className = "sensor-meta-row";
+            row.textContent = "no sensor details";
+            metaList.appendChild(row);
+        }
+
+        card.appendChild(header);
+        card.appendChild(summary);
+        card.appendChild(metaList);
+        panel.appendChild(card);
+    });
+}
+
+function getCameraByRole(cameras, role) {
+    if (!Array.isArray(cameras)) return null;
+    const byRole = cameras.find(function (camera) {
+        return camera && camera.role === role;
+    });
+    if (byRole) return byRole;
+    if (role === "primary_rgb") {
+        return cameras[0] || null;
+    }
+    return null;
+}
+
+function populateCameraSection(prefix, camera, defaults) {
+    const cfg = camera || defaults || {};
+    const enabledEl = document.getElementById("cfg-" + prefix + "-enabled");
+    const typeEl = document.getElementById("cfg-" + prefix + "-type");
+    const sensorIdEl = document.getElementById("cfg-" + prefix + "-sensor-id");
+    const indexEl = document.getElementById("cfg-" + prefix + "-index");
+    const widthEl = document.getElementById("cfg-" + prefix + "-w");
+    const heightEl = document.getElementById("cfg-" + prefix + "-h");
+    const fpsEl = document.getElementById("cfg-" + prefix + "-fps");
+    const flipEl = document.getElementById("cfg-" + prefix + "-flip");
+
+    if (enabledEl) enabledEl.checked = cfg.enabled !== false;
+    if (typeEl) typeEl.value = cfg.type || defaults.type || "csi";
+    if (sensorIdEl) {
+        if (cfg.sensor_id !== undefined) {
+            sensorIdEl.value = cfg.sensor_id;
+        } else if (cfg.index !== undefined) {
+            sensorIdEl.value = cfg.index;
+        }
+    }
+    if (indexEl && cfg.index !== undefined) indexEl.value = cfg.index;
+    if (widthEl) widthEl.value = cfg.width || defaults.width || 640;
+    if (heightEl) heightEl.value = cfg.height || defaults.height || 480;
+    if (fpsEl) fpsEl.value = cfg.fps || defaults.fps || 15;
+    if (flipEl && cfg.flip_method !== undefined) flipEl.value = cfg.flip_method;
+}
+
+function readCameraSection(prefix, role, defaults) {
+    function readNumber(el, fallback) {
+        if (!el || el.value === "") return fallback;
+        const num = parseInt(el.value, 10);
+        return isFinite(num) ? num : fallback;
+    }
+
+    const enabledEl = document.getElementById("cfg-" + prefix + "-enabled");
+    const typeEl = document.getElementById("cfg-" + prefix + "-type");
+    const sensorIdEl = document.getElementById("cfg-" + prefix + "-sensor-id");
+    const indexEl = document.getElementById("cfg-" + prefix + "-index");
+    const widthEl = document.getElementById("cfg-" + prefix + "-w");
+    const heightEl = document.getElementById("cfg-" + prefix + "-h");
+    const fpsEl = document.getElementById("cfg-" + prefix + "-fps");
+    const flipEl = document.getElementById("cfg-" + prefix + "-flip");
+
+    const camera = {
+        role: role,
+        type: typeEl ? typeEl.value : (defaults.type || "csi"),
+        enabled: enabledEl ? enabledEl.checked : true,
+        width: readNumber(widthEl, defaults.width || 640),
+        height: readNumber(heightEl, defaults.height || 480),
+        fps: readNumber(fpsEl, defaults.fps || 15),
+    };
+
+    if (sensorIdEl && sensorIdEl.value !== "") {
+        camera.sensor_id = readNumber(sensorIdEl, defaults.sensor_id);
+    }
+    if (indexEl && indexEl.value !== "") {
+        camera.index = readNumber(indexEl, defaults.index);
+    }
+    if (flipEl && flipEl.value !== "") {
+        camera.flip_method = readNumber(flipEl, defaults.flip_method);
+    }
+
+    if (camera.type === "csi" && camera.sensor_id === undefined && camera.index !== undefined) {
+        camera.sensor_id = camera.index;
+    }
+    if (camera.type === "opencv" && camera.index === undefined && camera.sensor_id !== undefined) {
+        camera.index = camera.sensor_id;
+    }
+
+    return camera;
+}
+
 function clearPreview() {
     const img = document.getElementById("live-preview");
     const placeholder = document.getElementById("preview-placeholder");
@@ -353,10 +559,14 @@ function updateDetailView() {
     const fps = d.state && d.state.fps ? d.state.fps : 0;
     document.getElementById("detail-fps").innerText = String(fps);
 
-    const mission = d.state && d.state.mission ? d.state.mission : {};
+    const state = d.state || {};
+    const sensorRig = state.sensors || state.sensor_rig || {};
+    renderSensorRig(sensorRig);
+
+    const mission = state.mission ? state.mission : {};
     updateMissionView(mission);
 
-    const lastAction = d.state && d.state.last_action ? d.state.last_action : null;
+    const lastAction = state.last_action ? state.last_action : null;
     if (lastAction) {
         const steer = lastAction.steer !== undefined ? Number(lastAction.steer).toFixed(2) : "n/a";
         const throttle = lastAction.throttle !== undefined ? Number(lastAction.throttle).toFixed(2) : "n/a";
@@ -365,15 +575,15 @@ function updateDetailView() {
         setText("last-action", "N/A");
     }
 
-    const loc = d.state && d.state.location ? d.state.location : {};
-    const imu = loc.imu || {};
+    const loc = state.location || {};
+    const imu = loc.imu || (sensorRig.sidecar_depth_imu && sensorRig.sidecar_depth_imu.imu_data) || {};
     document.getElementById("imu-accel").innerText = imu.accel ? formatVector(imu.accel) : "N/A";
     document.getElementById("imu-gyro").innerText = imu.gyro ? formatVector(imu.gyro) : "N/A";
 
     const detList = document.getElementById("detection-list");
     if (detList) {
         detList.innerHTML = "";
-        const dets = d.state && d.state.detections ? d.state.detections : [];
+        const dets = state.detections ? state.detections : [];
         if (!dets.length) {
             detList.innerHTML = "<li>No objects detected</li>";
         } else {
@@ -387,14 +597,14 @@ function updateDetailView() {
         }
     }
 
-    const specs = d.state && d.state.specs ? d.state.specs : {};
+    const specs = state.specs ? state.specs : {};
     document.getElementById("spec-device").innerText = specs.device || "Unknown";
     document.getElementById("spec-cpu").innerText = specs.cpu_ram || "Unknown";
 
     let camText = "None";
     if (specs.cameras && Array.isArray(specs.cameras)) {
         camText = specs.cameras.map(function (c) {
-            return c.type + " (" + c.width + "x" + c.height + ")";
+            return cameraSummary(c);
         }).join(", ");
     } else if (specs.cameras) {
         camText = specs.cameras;
@@ -517,13 +727,14 @@ function openConfigModal() {
     document.getElementById("config-modal").style.display = "flex";
 
     const cfg = (car.details && car.details.config) ? car.details.config : {};
-    if (cfg.cameras && cfg.cameras.length > 0) {
-        const cam = cfg.cameras[0];
-        document.getElementById("cfg-cam-type").value = cam.type || "realsense";
-        document.getElementById("cfg-cam-w").value = cam.width || 640;
-        document.getElementById("cfg-cam-h").value = cam.height || 480;
-        document.getElementById("cfg-cam-fps").value = cam.fps || 15;
-    }
+    const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
+    const primary = getCameraByRole(cameras, "primary_rgb") || cameras[0] || { type: "csi", width: 640, height: 480, fps: 15, enabled: true };
+    const sidecar = getCameraByRole(cameras, "sidecar_depth_imu") || (primary.type === "realsense" ? primary : { type: "realsense", width: 640, height: 480, fps: 15, enabled: false });
+    const rear = getCameraByRole(cameras, "rear_preview") || { type: "csi", sensor_id: 1, width: 640, height: 480, fps: 15, flip_method: 2, enabled: false };
+
+    populateCameraSection("primary", primary, { type: "csi", width: 640, height: 480, fps: 15, enabled: true, flip_method: 2 });
+    populateCameraSection("sidecar", sidecar, { type: "realsense", width: 640, height: 480, fps: 15, enabled: primary.type === "realsense" });
+    populateCameraSection("rear", rear, { type: "csi", sensor_id: 1, width: 640, height: 480, fps: 15, enabled: false, flip_method: 2 });
     document.getElementById("cfg-ctl-type").value = cfg.control_model_type || "tensorrt";
     document.getElementById("cfg-ctl-arch").value = cfg.architecture || "resnet101";
     document.getElementById("cfg-ctl-path").value = cfg.control_model || "";
@@ -537,10 +748,9 @@ function closeConfigModal() {
 }
 
 function resetConfigToDefaults() {
-    document.getElementById("cfg-cam-type").value = "realsense";
-    document.getElementById("cfg-cam-w").value = "640";
-    document.getElementById("cfg-cam-h").value = "480";
-    document.getElementById("cfg-cam-fps").value = "15";
+    populateCameraSection("primary", { type: "csi", width: 640, height: 480, fps: 15, enabled: true, sensor_id: 0, flip_method: 2 }, { type: "csi", width: 640, height: 480, fps: 15, enabled: true, flip_method: 2 });
+    populateCameraSection("sidecar", { type: "realsense", width: 640, height: 480, fps: 15, enabled: true }, { type: "realsense", width: 640, height: 480, fps: 15, enabled: true });
+    populateCameraSection("rear", { type: "csi", sensor_id: 1, width: 640, height: 480, fps: 15, flip_method: 2, enabled: false }, { type: "csi", sensor_id: 1, width: 640, height: 480, fps: 15, flip_method: 2, enabled: false });
     document.getElementById("cfg-ctl-type").value = "tensorrt";
     document.getElementById("cfg-ctl-arch").value = "resnet101";
     document.getElementById("cfg-ctl-path").value = "/home/jetson/jetracer_run/checkpoints/checkpoints/model_7_resnet101/best_model_trt.pth";
@@ -554,16 +764,15 @@ async function deployConfig() {
 
     const current = getSelectedCar();
     const currentMission = current && current.details && current.details.config ? current.details.config.mission : null;
+    const primary = readCameraSection("primary", "primary_rgb", { type: "csi", width: 640, height: 480, fps: 15 });
+    const sidecar = readCameraSection("sidecar", "sidecar_depth_imu", { type: "realsense", width: 640, height: 480, fps: 15 });
+    const rear = readCameraSection("rear", "rear_preview", { type: "csi", sensor_id: 1, width: 640, height: 480, fps: 15, flip_method: 2 });
+    const preprocessProfile = primary.enabled && primary.type === "csi" ? "cam0_fisheye_v1" : "legacy_resize_v0";
     const config = {
         device: document.getElementById("cfg-device").value,
         architecture: document.getElementById("cfg-ctl-arch").value,
-        cameras: [{
-            type: document.getElementById("cfg-cam-type").value,
-            width: parseInt(document.getElementById("cfg-cam-w").value, 10),
-            height: parseInt(document.getElementById("cfg-cam-h").value, 10),
-            fps: parseInt(document.getElementById("cfg-cam-fps").value, 10),
-            index: 0
-        }],
+        preprocess_profile: preprocessProfile,
+        cameras: [primary, sidecar, rear],
         control_model_type: document.getElementById("cfg-ctl-type").value,
         control_model: document.getElementById("cfg-ctl-path").value,
         detection_model: document.getElementById("cfg-det-path").value,

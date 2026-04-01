@@ -25,6 +25,20 @@ import numpy as np
 import select
 import argparse
 import queue
+import sys
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
+if REPO_ROOT not in sys.path:
+    sys.path.append(REPO_ROOT)
+
+from preprocess_utils import (
+    apply_preprocess_profile,
+    LEGACY_PREPROCESS_PROFILE,
+    infer_preprocess_profile,
+    PREPROCESS_OUTPUT_HEIGHT,
+    PREPROCESS_OUTPUT_WIDTH,
+)
 
 try:
     import gi
@@ -40,6 +54,7 @@ except Exception:
 parser = argparse.ArgumentParser()
 parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type")
 parser.add_argument("--device", type=int, default=0, help="Camera device ID (for opencv)")
+parser.add_argument('--primary_rgb_source', type=str, default='main_camera', choices=['main_camera', 'cam0'], help='Primary RGB source for canonical rgb_path')
 parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+depth')
 parser.add_argument('--control_mode', type=str, default=None, choices=['joystick', 'steer_trigger'], help='Optional override for control mapping: "steer_trigger" uses left trigger for accel')
 parser.add_argument('--always_save', action='store_true', help='Save frames at TARGET_FPS even when controls have not changed')
@@ -54,6 +69,16 @@ parser.add_argument('--view_360_save_height', type=int, default=240, help='Saved
 parser.add_argument('--view_360_cam0_flip_method', type=int, default=2, help='nvvidconv flip-method for CAM0 (0-7)')
 parser.add_argument('--view_360_cam1_flip_method', type=int, default=2, help='nvvidconv flip-method for CAM1 (0-7)')
 args = parser.parse_args()
+
+PRIMARY_RGB_SOURCE = args.primary_rgb_source
+PRIMARY_RGB_IS_CAM0 = PRIMARY_RGB_SOURCE == "cam0"
+PREPROCESS_PROFILE = infer_preprocess_profile(
+    camera_configs=[
+        {"role": "primary_rgb", "type": "csi"} if PRIMARY_RGB_IS_CAM0 else {"role": "primary_rgb", "type": args.camera}
+    ],
+)
+DEFAULT_OUTPUT_SIZE = (PREPROCESS_OUTPUT_WIDTH, PREPROCESS_OUTPUT_HEIGHT)
+RUN_ID = None
 
 if args.camera in ["opencv", "other"]:
     realsense_full.set_camera_type("opencv", args.device)
@@ -312,43 +337,57 @@ class CsiCameraStream:
         self.thread = None
 
 
-class DualCsi360Capture:
-    def __init__(self):
-        self.cam0 = CsiCameraStream(
-            sensor_id=args.view_360_cam0_sensor_id,
-            width=args.view_360_width,
-            height=args.view_360_height,
-            fps=args.view_360_fps,
-            flip_method=args.view_360_cam0_flip_method,
-            label="CAM0",
-        )
-        self.cam1 = CsiCameraStream(
-            sensor_id=args.view_360_cam1_sensor_id,
-            width=args.view_360_width,
-            height=args.view_360_height,
-            fps=args.view_360_fps,
-            flip_method=args.view_360_cam1_flip_method,
-            label="CAM1",
-        )
+class CsiRigCapture:
+    def __init__(self, enable_cam0=True, enable_cam1=True):
+        self.enable_cam0 = enable_cam0
+        self.enable_cam1 = enable_cam1
+        self.cam0 = None
+        self.cam1 = None
+        self.cam0_ok = False
+        self.cam1_ok = False
         self.enabled = False
 
+        if self.enable_cam0:
+            self.cam0 = CsiCameraStream(
+                sensor_id=args.view_360_cam0_sensor_id,
+                width=args.view_360_width,
+                height=args.view_360_height,
+                fps=args.view_360_fps,
+                flip_method=args.view_360_cam0_flip_method,
+                label="CAM0",
+            )
+        if self.enable_cam1:
+            self.cam1 = CsiCameraStream(
+                sensor_id=args.view_360_cam1_sensor_id,
+                width=args.view_360_width,
+                height=args.view_360_height,
+                fps=args.view_360_fps,
+                flip_method=args.view_360_cam1_flip_method,
+                label="CAM1",
+            )
+
     def start(self):
-        cam0_ok = self.cam0.start()
-        cam1_ok = self.cam1.start()
-        self.enabled = cam0_ok and cam1_ok
-        if not self.enabled:
-            print("[360] Disabling 360 capture because one or more CSI cameras failed to start.")
-            self.stop()
+        if self.cam0 is not None:
+            self.cam0_ok = self.cam0.start()
+        if self.cam1 is not None:
+            self.cam1_ok = self.cam1.start()
+        self.enabled = bool(self.cam0_ok or self.cam1_ok)
+        if self.enable_cam0 and not self.cam0_ok:
+            print("[360] CAM0 failed to start.")
+        if self.enable_cam1 and not self.cam1_ok:
+            print("[360] CAM1 failed to start.")
         return self.enabled
 
     def get_frames(self):
-        if not self.enabled:
-            return None, None
-        return self.cam0.get_frame(), self.cam1.get_frame()
+        cam0_frame = self.cam0.get_frame() if self.cam0 is not None else None
+        cam1_frame = self.cam1.get_frame() if self.cam1 is not None else None
+        return cam0_frame, cam1_frame
 
     def stop(self):
-        self.cam0.stop()
-        self.cam1.stop()
+        if self.cam0 is not None:
+            self.cam0.stop()
+        if self.cam1 is not None:
+            self.cam1.stop()
         self.enabled = False
 
 # ================= PCA9685 (SMBus) =================
@@ -458,15 +497,17 @@ else:
     print("Using 100% steering.")
 
 # ================= OPTIONAL 360 CSI CAMERAS =================
-view_360_capture = None
+cam_rig = None
+cam0_enabled = PRIMARY_RGB_IS_CAM0 or args.view_360
+cam1_enabled = args.view_360
 VIEW_360_ENABLED = False
 view_360_waiting_logged = False
 
-if args.view_360 and CAMERA_ENABLED:
-    view_360_capture = DualCsi360Capture()
-    VIEW_360_ENABLED = view_360_capture.start()
-elif args.view_360:
-    print("[360] 360 capture requested but CAMERA_ENABLED=False, so CAM0/CAM1 recording is disabled.")
+if (cam0_enabled or cam1_enabled) and CAMERA_ENABLED:
+    cam_rig = CsiRigCapture(enable_cam0=cam0_enabled, enable_cam1=cam1_enabled)
+    VIEW_360_ENABLED = cam_rig.start()
+elif cam0_enabled or cam1_enabled:
+    print("[360] CSI capture requested but CAMERA_ENABLED=False, so CAM0/CAM1 recording is disabled.")
 
 # ================= MULTI-SESSION SETUP =================
 BASE_RUN_DIR = "runs_rgb_depth"
@@ -478,17 +519,29 @@ def create_new_session():
     return session_dir
 
 def get_dataset_header():
-    if args.record_mode == 'all' and args.camera == 'realsense':
-        header = ["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"]
-    else:
-        header = ["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"]
-
-    if VIEW_360_ENABLED:
-        header.extend(["cam0_path", "cam1_path"])
-
-    return header
+    return [
+        "timestamp",
+        "steer_us",
+        "throttle_us",
+        "steer_norm",
+        "throttle_norm",
+        "depth_front",
+        "rgb_path",
+        "rgb_source",
+        "depth_source",
+        "imu_source",
+        "rear_rgb_source",
+        "preprocess_profile",
+        "run_id",
+        "session_id",
+        "cam0_path",
+        "cam1_path",
+        "ir_path",
+        "depth_path",
+    ]
 
 RUN_DIR = create_new_session()
+RUN_ID = os.path.basename(RUN_DIR)
 csv_path = os.path.join(RUN_DIR, "dataset.csv")
 csv_file = open(csv_path, "w", newline="")
 writer = csv.writer(csv_file)
@@ -499,12 +552,30 @@ frame_idx = 0
 # ================= WRITER THREAD =================
 write_queue = queue.Queue(maxsize=100)
 
-def save_resized_frame(image, path, width, height):
+def save_canonical_frame(image, path, profile, output_size=DEFAULT_OUTPUT_SIZE):
     if image is None or path is None:
         return
 
-    image_small = cv2.resize(image, (width, height))
+    if output_size == DEFAULT_OUTPUT_SIZE:
+        image_small = apply_preprocess_profile(image, profile)
+    else:
+        image_small = cv2.resize(image, output_size)
     cv2.imwrite(path, image_small)
+
+def build_row_metadata(rgb_source, depth_source, imu_source, rear_rgb_source, preprocess_profile, cam0_path, cam1_path, ir_path, depth_path):
+    return [
+        rgb_source,
+        depth_source,
+        imu_source,
+        rear_rgb_source,
+        preprocess_profile,
+        RUN_ID,
+        RUN_ID,
+        cam0_path,
+        cam1_path,
+        ir_path,
+        depth_path,
+    ]
 
 def writer_worker():
     global csv_file, writer
@@ -521,25 +592,35 @@ def writer_worker():
         cmd = item[0]
         
         if cmd == "FRAME":
-            _, rgb, row_data, rgb_path, extra_frames = item
+            _, rgb, row_data, rgb_path, rgb_profile, extra_frames = item
             try:
-                save_resized_frame(rgb, rgb_path, cfg.IMG_WIDTH, cfg.IMG_HEIGHT)
+                save_canonical_frame(rgb, rgb_path, rgb_profile)
                 for extra_path, extra_image in extra_frames:
-                    save_resized_frame(extra_image, extra_path, args.view_360_save_width, args.view_360_save_height)
+                    save_canonical_frame(
+                        extra_image,
+                        extra_path,
+                        LEGACY_PREPROCESS_PROFILE,
+                        output_size=(args.view_360_save_width, args.view_360_save_height),
+                    )
                 writer.writerow(row_data)
                 csv_file.flush()
             except Exception as e:
                 print(f"Write error: {e}")
         elif cmd == "FRAME_ALL":
-            _, rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path, extra_frames = item
+            _, rgb, ir_image, depth_map, row_data, rgb_path, rgb_profile, ir_path, depth_path, extra_frames = item
             try:
-                save_resized_frame(rgb, rgb_path, cfg.IMG_WIDTH, cfg.IMG_HEIGHT)
+                save_canonical_frame(rgb, rgb_path, rgb_profile)
                 if ir_image is not None and ir_path is not None:
                     cv2.imwrite(ir_path, ir_image)
                 if depth_map is not None and depth_path is not None:
                     cv2.imwrite(depth_path, depth_map)
                 for extra_path, extra_image in extra_frames:
-                    save_resized_frame(extra_image, extra_path, args.view_360_save_width, args.view_360_save_height)
+                    save_canonical_frame(
+                        extra_image,
+                        extra_path,
+                        LEGACY_PREPROCESS_PROFILE,
+                        output_size=(args.view_360_save_width, args.view_360_save_height),
+                    )
                 writer.writerow(row_data)
                 csv_file.flush()
             except Exception as e:
@@ -573,45 +654,77 @@ def pwm_to_norm(us):
 
 def get_rgb_and_front_depth():
     if not CAMERA_ENABLED:
-        if args.record_mode == 'all' and args.camera == 'realsense':
-            return None, 0.0, None, None
-        return None, 0.0
+        return None, 0.0, None, None
 
-    # If user requested all frames and using RealSense, try to fetch RGB, IR and full depth map
-    if args.record_mode == 'all' and args.camera == 'realsense':
+    ir_image = None
+    depth_map = None
+    center_depth = 0.0
+    rgb = None
+
+    if PRIMARY_RGB_IS_CAM0:
+        if cam_rig is None or not cam_rig.cam0_ok:
+            return None, None, None, None
+
+    if args.camera == 'realsense' and hasattr(realsense_full, 'get_all_frames') and args.record_mode == 'all':
         if hasattr(realsense_full, 'get_all_frames'):
             rgb, center_depth, ir_image, depth_map = realsense_full.get_all_frames()
         else:
             rgb, center_depth = realsense_full.get_aligned_frames()
-            ir_image, depth_map = None, None
-        if rgb is None:
-            return None, None, None, None
-        return rgb, float(center_depth), ir_image, depth_map
+        center_depth = float(center_depth or 0.0)
+    else:
+        rgb, center_depth = realsense_full.get_aligned_frames()
+        center_depth = float(center_depth or 0.0)
 
-    # Default: RGB + single center depth
-    rgb, center_depth = realsense_full.get_aligned_frames()
+    if PRIMARY_RGB_IS_CAM0 and cam_rig is not None:
+        cam0_frame, _ = cam_rig.get_frames()
+        rgb = cam0_frame
+
     if rgb is None:
-        return None, None
-    return rgb, float(center_depth)
+        return None, None, None, None
+
+    if not (args.record_mode == 'all' and args.camera == 'realsense'):
+        ir_image = None
+        depth_map = None
+
+    return rgb, center_depth, ir_image, depth_map
 
 def get_view_360_capture(frame_number):
     global view_360_waiting_logged
 
-    if not VIEW_360_ENABLED or view_360_capture is None:
+    if not VIEW_360_ENABLED or cam_rig is None:
         return [], []
 
-    cam0_frame, cam1_frame = view_360_capture.get_frames()
-    if cam0_frame is None or cam1_frame is None:
+    cam0_frame, cam1_frame = cam_rig.get_frames()
+    extra_frames = []
+    extra_paths = []
+
+    if PRIMARY_RGB_IS_CAM0:
+        if cam1_frame is not None:
+            cam1_path = os.path.join(RUN_DIR, f"cam1_{frame_number:05d}.png")
+            extra_frames.append((cam1_path, cam1_frame))
+            extra_paths.append(cam1_path)
+        elif cam1_enabled and not view_360_waiting_logged:
+            print("\n[360] Waiting for CAM1 frames before saving rear-preview sidecar data...")
+            view_360_waiting_logged = True
+        view_360_waiting_logged = False if cam1_frame is not None else view_360_waiting_logged
+        return extra_frames, extra_paths
+
+    if cam0_frame is None and cam1_frame is None:
         if not view_360_waiting_logged:
             print("\n[360] Waiting for CAM0/CAM1 frames before saving synchronized 360 data...")
             view_360_waiting_logged = True
         return None, None
 
+    if cam0_frame is not None:
+        cam0_path = os.path.join(RUN_DIR, f"cam0_{frame_number:05d}.png")
+        extra_frames.append((cam0_path, cam0_frame))
+        extra_paths.append(cam0_path)
+    if cam1_frame is not None:
+        cam1_path = os.path.join(RUN_DIR, f"cam1_{frame_number:05d}.png")
+        extra_frames.append((cam1_path, cam1_frame))
+        extra_paths.append(cam1_path)
+
     view_360_waiting_logged = False
-    cam0_path = os.path.join(RUN_DIR, f"cam0_{frame_number:05d}.png")
-    cam1_path = os.path.join(RUN_DIR, f"cam1_{frame_number:05d}.png")
-    extra_frames = [(cam0_path, cam0_frame), (cam1_path, cam1_frame)]
-    extra_paths = [cam0_path, cam1_path]
     return extra_frames, extra_paths
 
 def delete_last_n(n):
@@ -625,7 +738,7 @@ def delete_last_n(n):
     print(f"\nRequested delete of last {n} frames -> index reverted to {frame_idx}")
 
 def delete_current_session():
-    global frame_idx, RUN_DIR, csv_path, csv_file, writer, recording, view_360_waiting_logged
+    global frame_idx, RUN_DIR, RUN_ID, csv_path, csv_file, writer, recording, view_360_waiting_logged
     confirm = input(f"\nDelete current session '{RUN_DIR}'? [y/N]: ").strip().lower()
     if confirm == 'y':
         recording = False
@@ -638,6 +751,7 @@ def delete_current_session():
         os.rmdir(RUN_DIR)
         print(f"Session '{RUN_DIR}' deleted!")
         RUN_DIR = create_new_session()
+        RUN_ID = os.path.basename(RUN_DIR)
         csv_path = os.path.join(RUN_DIR, "dataset.csv")
         csv_file = open(csv_path, "w", newline="")
         writer = csv.writer(csv_file)
@@ -729,51 +843,78 @@ def recording_worker():
                 
                 # Save if inputs changed beyond threshold OR user requested always-save
                 if args.always_save or abs(s_us - last_steer_rec) >= MIN_CHANGE_US or abs(t_us - last_throttle_rec) >= MIN_CHANGE_US:
-                        # Fetch frame(s) according to requested record_mode
-                        if args.record_mode == 'all' and args.camera == 'realsense':
-                            rgb, depth_front, ir_image, depth_map = get_rgb_and_front_depth()
-                            if rgb is not None:
-                                extra_frames, extra_paths = get_view_360_capture(frame_idx)
-                                if extra_frames is None:
-                                    time.sleep(0.005)
-                                    continue
-                                rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
-                                ir_path = os.path.join(RUN_DIR, f"ir_{frame_idx:05d}.png") if ir_image is not None else None
-                                depth_path = os.path.join(RUN_DIR, f"depth_{frame_idx:05d}.png") if depth_map is not None else None
-                                row_data = [time.time(), s_us, t_us,
-                                            pwm_to_norm(s_us), pwm_to_norm(t_us),
-                                            depth_front, rgb_path, ir_path, depth_path]
-                                row_data.extend(extra_paths)
-                                if not write_queue.full():
-                                    write_queue.put(("FRAME_ALL", rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path, extra_frames))
-                                    last_steer_rec = s_us
-                                    last_throttle_rec = t_us
-                                    frame_idx += 1
-                                    last_save_time = now
-                                    if frame_idx % 2 == 0:
-                                        print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
-                                              f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
-                        else:
-                            rgb, depth_front = get_rgb_and_front_depth()
-                            if rgb is not None:
-                                extra_frames, extra_paths = get_view_360_capture(frame_idx)
-                                if extra_frames is None:
-                                    time.sleep(0.005)
-                                    continue
-                                rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
-                                row_data = [time.time(), s_us, t_us,
-                                            pwm_to_norm(s_us), pwm_to_norm(t_us),
-                                            depth_front, rgb_path]
-                                row_data.extend(extra_paths)
-                                if not write_queue.full():
-                                    write_queue.put(("FRAME", rgb, row_data, rgb_path, extra_frames))
-                                    last_steer_rec = s_us
-                                    last_throttle_rec = t_us
-                                    frame_idx += 1
-                                    last_save_time = now
-                                    if frame_idx % 2 == 0:
-                                        print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
-                                              f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
+                        rgb, depth_front, ir_image, depth_map = get_rgb_and_front_depth()
+                        if rgb is not None:
+                            extra_frames, extra_paths = get_view_360_capture(frame_idx)
+                            if extra_frames is None:
+                                time.sleep(0.005)
+                                continue
+
+                            rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                            ir_path = os.path.join(RUN_DIR, f"ir_{frame_idx:05d}.png") if ir_image is not None else None
+                            depth_path = os.path.join(RUN_DIR, f"depth_{frame_idx:05d}.png") if depth_map is not None else None
+
+                            rgb_source = "cam0" if PRIMARY_RGB_IS_CAM0 else ("realsense" if args.camera == "realsense" else "opencv")
+                            depth_source = "realsense_d435i" if args.camera == "realsense" else "opencv"
+                            imu_source = depth_source
+                            rear_rgb_source = "cam1" if any(
+                                os.path.basename(extra_path).startswith("cam1_")
+                                for extra_path in extra_paths
+                            ) else "none"
+
+                            cam0_path = rgb_path if PRIMARY_RGB_IS_CAM0 else next((p for p in extra_paths if os.path.basename(p).startswith("cam0_")), "")
+                            cam1_path = next((p for p in extra_paths if os.path.basename(p).startswith("cam1_")), "")
+                            row_data = [
+                                time.time(),
+                                s_us,
+                                t_us,
+                                pwm_to_norm(s_us),
+                                pwm_to_norm(t_us),
+                                depth_front,
+                                rgb_path,
+                                *build_row_metadata(
+                                    rgb_source,
+                                    depth_source,
+                                    imu_source,
+                                    rear_rgb_source,
+                                    PREPROCESS_PROFILE,
+                                    cam0_path,
+                                    cam1_path,
+                                    ir_path,
+                                    depth_path,
+                                ),
+                            ]
+                            if not write_queue.full():
+                                cmd = "FRAME_ALL" if ir_image is not None or depth_map is not None else "FRAME"
+                                if cmd == "FRAME_ALL":
+                                    write_queue.put((
+                                        "FRAME_ALL",
+                                        rgb,
+                                        ir_image,
+                                        depth_map,
+                                        row_data,
+                                        rgb_path,
+                                        PREPROCESS_PROFILE,
+                                        ir_path,
+                                        depth_path,
+                                        extra_frames,
+                                    ))
+                                else:
+                                    write_queue.put((
+                                        "FRAME",
+                                        rgb,
+                                        row_data,
+                                        rgb_path,
+                                        PREPROCESS_PROFILE,
+                                        extra_frames,
+                                    ))
+                                last_steer_rec = s_us
+                                last_throttle_rec = t_us
+                                frame_idx += 1
+                                last_save_time = now
+                                if frame_idx % 2 == 0:
+                                    print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
+                                          f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
             
             # Small sleep to prevent CPU hogging in this thread
             time.sleep(0.005)
@@ -810,15 +951,24 @@ print("  ENTER -> Start/Pause recording")
 print(f"  BACKSPACE -> Delete last {cfg.DELETE_N_FRAMES} frames")
 print("  DEL/d -> Delete current session")
 print("  Ctrl+C -> Quit")
-if VIEW_360_ENABLED:
+if PRIMARY_RGB_IS_CAM0:
     print(
-        f"  360 View -> ENABLED (CAM0 sensor-id={args.view_360_cam0_sensor_id}, "
+        f"  Primary RGB -> CAM0 (sensor-id={args.view_360_cam0_sensor_id}, "
+        f"save={DEFAULT_OUTPUT_SIZE[0]}x{DEFAULT_OUTPUT_SIZE[1]}, profile={PREPROCESS_PROFILE})"
+    )
+elif args.primary_rgb_source == "main_camera":
+    print("  Primary RGB -> Main camera (RealSense if available)")
+if cam_rig is not None and cam_rig.cam1_ok:
+    print(
+        f"  Rear Preview -> ENABLED (CAM0 sensor-id={args.view_360_cam0_sensor_id}, "
         f"CAM1 sensor-id={args.view_360_cam1_sensor_id}, "
         f"save={args.view_360_save_width}x{args.view_360_save_height}, "
         f"flip={args.view_360_cam0_flip_method}/{args.view_360_cam1_flip_method})"
     )
+elif args.view_360 and cam_rig is not None and cam_rig.cam0_ok:
+    print("  Rear Preview -> CAM0 available, CAM1 unavailable; continuing without rear sidecar")
 elif args.view_360:
-    print("  360 View -> REQUESTED but unavailable, continuing without CAM0/CAM1 recording")
+    print("  Rear Preview -> REQUESTED but unavailable, continuing without CAM0/CAM1 recording")
 print("\n>>> RECORDING will start after pressing ENTER\n")
 
 # ================= UTIL: deadzone =================
@@ -927,8 +1077,8 @@ finally:
     neutralize()
     if not USE_NETWORK_CONTROLLER:
         pygame.quit()
-    if view_360_capture is not None:
-        view_360_capture.stop()
+    if cam_rig is not None:
+        cam_rig.stop()
     if CAMERA_ENABLED:
         try:
             realsense_full.stop_pipeline()
