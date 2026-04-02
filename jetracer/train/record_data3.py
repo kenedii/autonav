@@ -116,7 +116,7 @@ class Config:
     PWM_FREQ = 50
     IMG_WIDTH = 160
     IMG_HEIGHT = 120
-    TARGET_FPS = 10
+    TARGET_FPS = 5
     DELETE_N_FRAMES = 12
 
     # Safety scaling (set to safe defaults; change if needed)

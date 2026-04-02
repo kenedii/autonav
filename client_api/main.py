@@ -21,7 +21,7 @@ try:
     _FERNET_AVAILABLE = True
 except ImportError:
     _FERNET_AVAILABLE = False
-    logging.warning("[Security] 'cryptography' package not installed – messages will NOT be encrypted!")
+    logging.warning("[Security] 'cryptography' package not installed - messages will NOT be encrypted!")
 
 
 def _derive_fernet_key(password):
