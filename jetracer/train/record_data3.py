@@ -116,7 +116,7 @@ class Config:
     PWM_FREQ = 50
     IMG_WIDTH = 160
     IMG_HEIGHT = 120
-    TARGET_FPS = 2
+    TARGET_FPS = 10
     DELETE_N_FRAMES = 12
 
     # Safety scaling (set to safe defaults; change if needed)
@@ -951,6 +951,7 @@ print("  ENTER -> Start/Pause recording")
 print(f"  BACKSPACE -> Delete last {cfg.DELETE_N_FRAMES} frames")
 print("  DEL/d -> Delete current session")
 print("  Ctrl+C -> Quit")
+print(f"  Save Rate -> {cfg.TARGET_FPS} FPS")
 if PRIMARY_RGB_IS_CAM0:
     print(
         f"  Primary RGB -> CAM0 (sensor-id={args.view_360_cam0_sensor_id}, "
