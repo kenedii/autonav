@@ -301,6 +301,43 @@ def test_sidecar_alias_nodes_report_modality_specific_status_and_age():
     assert snapshot["imu"]["frame_age_ms"] is None
 
 
+def test_get_system_specs_handles_missing_cv2_cuda():
+    with patch.object(hardware, "_opencv_cuda_device_count", return_value=0):
+        specs = hardware.get_system_specs([])
+
+    assert specs["inference"] == "CPU"
+
+
+def test_csi_camera_falls_back_to_gi_gstreamer_backend():
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+    class FakeGstCsiCamera:
+        def __init__(self, sensor_id=0, width=640, height=480, fps=15, flip_method=0):
+            self.sensor_id = sensor_id
+            self.width = width
+            self.height = height
+            self.fps = fps
+            self.flip_method = flip_method
+
+        def read(self):
+            return frame, None, None
+
+        def release(self):
+            return None
+
+    with patch.object(hardware, "_opencv_has_gstreamer_build", return_value=False), \
+         patch.object(hardware, "HAS_GI_GST", True), \
+         patch.object(hardware, "GstAppSinkCSIInterface", FakeGstCsiCamera):
+        camera = hardware.CSICamera(sensor_id=1, width=160, height=120, fps=15, flip_method=2)
+        frame_rgb, depth, imu = camera.read()
+        camera.release()
+
+    assert camera.backend == "gi_gstreamer"
+    assert frame_rgb.shape == (120, 160, 3)
+    assert depth is None
+    assert imu is None
+
+
 def test_build_sensor_rig_keeps_sidecar_observable_when_primary_init_fails():
     configs = [
         {"role": "primary_rgb", "type": "csi", "sensor_id": 0, "enabled": True},

@@ -6,6 +6,18 @@ from smbus2 import SMBus
 import platform
 import subprocess
 
+# Try importing GStreamer Python bindings for CSI fallback when OpenCV
+# lacks GStreamer support on Jetson.
+try:
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    HAS_GI_GST = True
+except Exception:
+    Gst = None
+    HAS_GI_GST = False
+
 # Try importing pyrealsense2, handle if missing
 try:
     import pyrealsense2 as rs
@@ -69,6 +81,39 @@ ROLE_USED_FOR = {
     ROLE_REAR_PREVIEW: ["rear_preview_only"],
 }
 logger = logging.getLogger("Hardware")
+_CV2_GSTREAMER_ENABLED = None
+
+
+def _opencv_cuda_device_count():
+    cuda_module = getattr(cv2, "cuda", None)
+    if cuda_module is None:
+        return 0
+    try:
+        return int(cuda_module.getCudaEnabledDeviceCount())
+    except Exception:
+        return 0
+
+
+def _opencv_has_gstreamer_build():
+    global _CV2_GSTREAMER_ENABLED
+    if _CV2_GSTREAMER_ENABLED is not None:
+        return _CV2_GSTREAMER_ENABLED
+    if not hasattr(cv2, "CAP_GSTREAMER"):
+        _CV2_GSTREAMER_ENABLED = False
+        return _CV2_GSTREAMER_ENABLED
+    try:
+        build_info = cv2.getBuildInformation()
+    except Exception:
+        _CV2_GSTREAMER_ENABLED = False
+        return _CV2_GSTREAMER_ENABLED
+
+    enabled = False
+    for line in build_info.splitlines():
+        if "GStreamer" in line:
+            enabled = "YES" in line.upper()
+            break
+    _CV2_GSTREAMER_ENABLED = enabled
+    return _CV2_GSTREAMER_ENABLED
 
 
 def _coerce_bool(value, default=True):
@@ -144,7 +189,7 @@ def get_system_specs(cameras=None):
         "device": f"{platform.system()} {platform.release()}",
         "cpu_ram": get_cpu_ram_info(),
         "cameras": [],
-        "inference": "CUDA (GPU)" if cv2.cuda.getCudaEnabledDeviceCount() > 0 else "CPU",
+        "inference": "CUDA (GPU)" if _opencv_cuda_device_count() > 0 else "CPU",
         "resnet_version": "ResNet-101 (Default)",
         "yolo_version": "YOLOv8n (Default)"
     }
@@ -194,12 +239,26 @@ def _build_csi_pipeline(sensor_id, width, height, fps, flip_method):
     )
 
 
+def _build_csi_gst_appsink_pipeline(sensor_id, width, height, fps, flip_method, appsink_name="sink"):
+    return (
+        f"nvarguscamerasrc sensor-id={sensor_id} ! "
+        "video/x-raw(memory:NVMM), "
+        f"width=(int){width}, height=(int){height}, "
+        f"format=(string)NV12, framerate=(fraction){fps}/1 ! "
+        f"nvvidconv flip-method={flip_method} ! "
+        "video/x-raw, format=(string)BGRx ! "
+        "videoconvert ! "
+        f"video/x-raw, format=(string)BGR ! appsink name={appsink_name} "
+        "drop=true max-buffers=1 sync=false"
+    )
+
+
 class OpenCVCamera(CameraInterface):
     def __init__(self, index=0, width=640, height=480, fps=30):
         self.width = width
         self.height = height
 
-        if index == 0:
+        if index == 0 and _opencv_has_gstreamer_build():
             pipeline = _build_csi_pipeline(0, width, height, fps, 0)
             self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
             if not self.cap.isOpened():
@@ -231,21 +290,112 @@ class OpenCVCamera(CameraInterface):
         self.cap.release()
 
 
+class GstAppSinkCSIInterface(CameraInterface):
+    def __init__(self, sensor_id=0, width=640, height=480, fps=15, flip_method=0):
+        if not HAS_GI_GST:
+            raise RuntimeError("Python GStreamer bindings not installed")
+
+        self.width = width
+        self.height = height
+        self.sensor_id = sensor_id
+        self.flip_method = flip_method
+        self.pipeline = Gst.parse_launch(
+            _build_csi_gst_appsink_pipeline(sensor_id, width, height, fps, flip_method)
+        )
+        self.sink = self.pipeline.get_by_name("sink")
+        if self.sink is None:
+            self.pipeline.set_state(Gst.State.NULL)
+            raise RuntimeError("Failed to create CSI GStreamer appsink")
+        result = self.pipeline.set_state(Gst.State.PLAYING)
+        if result == Gst.StateChangeReturn.FAILURE:
+            self.pipeline.set_state(Gst.State.NULL)
+            raise RuntimeError(
+                f"Could not start CSI GStreamer pipeline sensor-id {sensor_id} "
+                f"({width}x{height}@{fps}, flip={flip_method})"
+            )
+
+    def read(self):
+        sample = self.sink.emit("try-pull-sample", 500000000)
+        if sample is None:
+            return None, None, None
+
+        buffer = sample.get_buffer()
+        caps = sample.get_caps()
+        if buffer is None or caps is None:
+            return None, None, None
+
+        structure = caps.get_structure(0)
+        width = int(structure.get_value("width"))
+        height = int(structure.get_value("height"))
+        ok, map_info = buffer.map(Gst.MapFlags.READ)
+        if not ok:
+            return None, None, None
+        try:
+            frame = np.frombuffer(map_info.data, dtype=np.uint8)
+            expected_size = width * height * 3
+            if frame.size < expected_size:
+                return None, None, None
+            frame = frame[:expected_size].reshape((height, width, 3)).copy()
+        finally:
+            buffer.unmap(map_info)
+
+        if frame.shape[1] != self.width or frame.shape[0] != self.height:
+            frame = cv2.resize(frame, (self.width, self.height))
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), None, None
+
+    def release(self):
+        if getattr(self, "pipeline", None) is not None:
+            self.pipeline.set_state(Gst.State.NULL)
+
+
 class CSICamera(CameraInterface):
     def __init__(self, sensor_id=0, width=640, height=480, fps=15, flip_method=0):
         self.width = width
         self.height = height
         self.sensor_id = sensor_id
         self.flip_method = flip_method
-        pipeline = _build_csi_pipeline(sensor_id, width, height, fps, flip_method)
-        self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-        if not self.cap.isOpened():
+        self.cap = None
+        self.gst_camera = None
+        self.backend = None
+
+        if _opencv_has_gstreamer_build():
+            pipeline = _build_csi_pipeline(sensor_id, width, height, fps, flip_method)
+            self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+            if self.cap.isOpened():
+                self.backend = "opencv_gstreamer"
+            else:
+                logger.warning(
+                    "OpenCV GStreamer CSI open failed for sensor-id %s; attempting GI Gst fallback.",
+                    sensor_id,
+                )
+                self.cap.release()
+                self.cap = None
+        elif HAS_GI_GST:
+            logger.info(
+                "OpenCV lacks GStreamer support; using GI Gst appsink fallback for CSI sensor-id %s.",
+                sensor_id,
+            )
+
+        if self.backend is None and HAS_GI_GST:
+            self.gst_camera = GstAppSinkCSIInterface(
+                sensor_id=sensor_id,
+                width=width,
+                height=height,
+                fps=fps,
+                flip_method=flip_method,
+            )
+            self.backend = "gi_gstreamer"
+
+        if self.backend is None:
             raise RuntimeError(
                 f"Could not open CSI camera sensor-id {sensor_id} "
                 f"({width}x{height}@{fps}, flip={flip_method})"
             )
 
     def read(self):
+        if self.backend == "gi_gstreamer" and self.gst_camera is not None:
+            return self.gst_camera.read()
+
         ret, frame = self.cap.read()
         if not ret or frame is None:
             return None, None, None
@@ -254,7 +404,10 @@ class CSICamera(CameraInterface):
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), None, None
 
     def release(self):
-        self.cap.release()
+        if self.gst_camera is not None:
+            self.gst_camera.release()
+        if self.cap is not None:
+            self.cap.release()
 
 
 class RealSenseCamera(CameraInterface):
