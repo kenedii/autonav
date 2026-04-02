@@ -411,12 +411,19 @@ class CSICamera(CameraInterface):
 
 
 class RealSenseCamera(CameraInterface):
-    def __init__(self, width=640, height=480, fps=15, enable_depth=True):
+    def __init__(self, width=640, height=480, fps=15, enable_depth=True, enable_color=True, enable_imu=True):
         if not HAS_REALSENSE:
             raise RuntimeError("pyrealsense2 not installed")
         
         self.pipeline = rs.pipeline()
         config = rs.config()
+        self.color_enabled = bool(enable_color)
+        self.depth_enabled = bool(enable_depth)
+        self.imu_enabled = bool(enable_imu)
+        self.motion_sensor = None
+        self.motion_queue = None
+        self._last_imu_data = {}
+        self._last_imu_ts = None
         
         # RealSense supports specific FPS: 6, 15, 30, 60.
         # Mapping to closest supported.
@@ -425,25 +432,21 @@ class RealSenseCamera(CameraInterface):
         elif fps > 10: r_fps = 15
         else: r_fps = 6
 
-        print(f"[Camera] RealSense requesting {width}x{height}@{r_fps} FPS (Depth: {enable_depth})")
+        print(
+            f"[Camera] RealSense requesting {width}x{height}@{r_fps} FPS "
+            f"(Color: {self.color_enabled}, Depth: {self.depth_enabled}, IMU: {self.imu_enabled})"
+        )
         
         try:
-            config.enable_stream(rs.stream.color, width, height, rs.format.rgb8, r_fps)
-            if enable_depth:
+            if self.color_enabled:
+                config.enable_stream(rs.stream.color, width, height, rs.format.rgb8, r_fps)
+            if self.depth_enabled:
                 config.enable_stream(rs.stream.depth, width, height, rs.format.z16, r_fps)
-            
-            # Enable IMU if available (D435i/D455)
-            try:
-                config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 63) # 63 or 250 Hz
-                config.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f, 200) # 200 or 400 Hz
-                print("[Camera] Enabling IMU streams (Accel/Gyro)")
-            except Exception as imu_e:
-                print(f"[Camera] IMU not available or failed: {imu_e}")
 
             self.profile = self.pipeline.start(config)
             
             # Optimization: Turn off laser if we don't need depth (saves power/heat)
-            if not enable_depth:
+            if not self.depth_enabled:
                 try:
                     dev = self.profile.get_device()
                     depth_sensor = dev.first_depth_sensor()
@@ -454,16 +457,15 @@ class RealSenseCamera(CameraInterface):
         except Exception as e:
             print(f"[Camera] Profile fail: {e}. Trying fallback...")
             config = rs.config()
-            config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 15)
-            # Only fallback to depth if enabled
-            if enable_depth:
+            if self.color_enabled:
+                config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 15)
+            if self.depth_enabled:
                 try:
                     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
                 except: pass
             self.profile = self.pipeline.start(config)
 
-        self.align = rs.align(rs.stream.color) if enable_depth else None
-        self.depth_enabled = enable_depth
+        self.align = rs.align(rs.stream.color) if self.depth_enabled and self.color_enabled else None
         
         # Power management: Set auto-exposure for stable FPS
         try:
@@ -472,44 +474,138 @@ class RealSenseCamera(CameraInterface):
                 if s.supports(rs.option.enable_auto_exposure):
                     s.set_option(rs.option.enable_auto_exposure, 1)
         except: pass
+
+        self._start_motion_sensor()
+
+    def _select_motion_profile(self, profiles, stream_type, preferred_fps):
+        candidates = []
+        for profile in profiles:
+            try:
+                if profile.stream_type() != stream_type:
+                    continue
+                if profile.format() != rs.format.motion_xyz32f:
+                    continue
+                candidates.append(profile)
+            except Exception:
+                continue
+        if not candidates:
+            return None
+        for fps in preferred_fps:
+            for profile in candidates:
+                try:
+                    if profile.fps() == fps:
+                        return profile
+                except Exception:
+                    continue
+        return candidates[0]
+
+    def _start_motion_sensor(self):
+        if not self.imu_enabled:
+            return
+        try:
+            device = self.profile.get_device()
+            motion_sensor = None
+            for sensor in device.query_sensors():
+                try:
+                    name = sensor.get_info(rs.camera_info.name)
+                except Exception:
+                    continue
+                if "Motion" in name:
+                    motion_sensor = sensor
+                    break
+            if motion_sensor is None:
+                print("[Camera] Motion sensor not available on RealSense device")
+                return
+
+            profiles = list(motion_sensor.get_stream_profiles())
+            accel_profile = self._select_motion_profile(profiles, rs.stream.accel, preferred_fps=(63, 250))
+            gyro_profile = self._select_motion_profile(profiles, rs.stream.gyro, preferred_fps=(200, 400))
+            selected_profiles = [profile for profile in (accel_profile, gyro_profile) if profile is not None]
+            if not selected_profiles:
+                print("[Camera] No compatible IMU motion profiles found")
+                return
+
+            self.motion_queue = rs.frame_queue(100)
+            motion_sensor.open(selected_profiles)
+            motion_sensor.start(self.motion_queue)
+            self.motion_sensor = motion_sensor
+            print("[Camera] Enabling IMU streams via motion sensor")
+        except Exception as imu_e:
+            print(f"[Camera] IMU motion sensor start failed: {imu_e}")
+            self.motion_sensor = None
+            self.motion_queue = None
+
+    def _read_motion_frames(self):
+        if self.motion_queue is None:
+            return dict(self._last_imu_data or {})
+
+        imu_data = dict(self._last_imu_data or {})
+        updated = False
+        while True:
+            try:
+                ok, frame = self.motion_queue.try_wait_for_frame(0)
+            except Exception:
+                break
+            if not ok or frame is None:
+                break
+            try:
+                if not frame.is_motion_frame():
+                    continue
+                stream_type = frame.profile.stream_type()
+                motion = frame.as_motion_frame().get_motion_data()
+                values = [motion.x, motion.y, motion.z]
+                if stream_type == rs.stream.accel:
+                    imu_data["accel"] = values
+                    updated = True
+                elif stream_type == rs.stream.gyro:
+                    imu_data["gyro"] = values
+                    updated = True
+            except Exception:
+                continue
+
+        if updated:
+            self._last_imu_data = dict(imu_data)
+            self._last_imu_ts = time.time()
+            return imu_data
+
+        if self._last_imu_ts is not None and (time.time() - self._last_imu_ts) <= 0.5:
+            return dict(self._last_imu_data)
+        return {}
             
     def read(self):
         try:
             frames = self.pipeline.wait_for_frames(timeout_ms=500)
             
-            color_frame = frames.get_color_frame()
+            color_frame = frames.get_color_frame() if self.color_enabled else None
             depth_data = None
-            imu_data = {}
+            imu_data = self._read_motion_frames()
 
-            # Get IMU data (accelerometer + gyro)
-            try:
-                accel_frame = frames.first_or_default(rs.stream.accel)
-                gyro_frame = frames.first_or_default(rs.stream.gyro)
-                if accel_frame:
-                    val = accel_frame.as_motion_frame().get_motion_data()
-                    imu_data['accel'] = [val.x, val.y, val.z]
-                if gyro_frame:
-                    val = gyro_frame.as_motion_frame().get_motion_data()
-                    imu_data['gyro'] = [val.x, val.y, val.z]
-            except Exception:
-                pass # IMU frame not available this cycle
-
-            if self.depth_enabled and self.align:
+            if self.depth_enabled and self.align is not None:
                 aligned = self.align.process(frames)
                 depth_frame = aligned.get_depth_frame()
                 if depth_frame:
                     depth_data = np.asanyarray(depth_frame.get_data())
+            elif self.depth_enabled:
+                depth_frame = frames.get_depth_frame()
+                if depth_frame:
+                    depth_data = np.asanyarray(depth_frame.get_data())
             
-            if not color_frame:
+            if self.color_enabled and not color_frame:
                 return None, None, None
-                
-            color_data = np.asanyarray(color_frame.get_data())
+
+            color_data = np.asanyarray(color_frame.get_data()) if color_frame else None
             return color_data, depth_data, imu_data
         except Exception as e:
             # Don't print every frame to avoid log spam, just yield
             return None, None, None
 
     def release(self):
+        try:
+            if self.motion_sensor is not None:
+                self.motion_sensor.stop()
+                self.motion_sensor.close()
+        except:
+            pass
         try:
             self.pipeline.stop()
             print("[Camera] RealSense pipeline stopped.")
@@ -831,7 +927,7 @@ def empty_sensor_snapshot():
     return CompositeSensorRig().snapshot()
 
 
-def get_camera(config, enable_depth=True):
+def get_camera(config, enable_depth=True, enable_color=True, enable_imu=True):
     cfg = normalize_camera_config(config)
     c_type = cfg.get("type", "opencv")
     print(f"[Camera] Initializing {c_type} (Need Depth: {enable_depth})...")
@@ -840,7 +936,9 @@ def get_camera(config, enable_depth=True):
             width=cfg.get("width", 640),
             height=cfg.get("height", 480),
             fps=cfg.get("fps", 15),
-            enable_depth=enable_depth
+            enable_depth=enable_depth,
+            enable_color=enable_color,
+            enable_imu=enable_imu,
         )
     if c_type == "csi":
         return CSICamera(
@@ -875,7 +973,12 @@ def build_sensor_rig(camera_configs, enable_depth=True):
     if primary_cfg is not None:
         primary_enable_depth = bool(enable_depth and primary_cfg is sidecar_cfg and primary_cfg.get("type") == "realsense")
         try:
-            primary_camera = get_camera(primary_cfg, enable_depth=primary_enable_depth)
+            primary_camera = get_camera(
+                primary_cfg,
+                enable_depth=primary_enable_depth,
+                enable_color=True,
+                enable_imu=bool(primary_cfg.get("type") == "realsense"),
+            )
         except Exception as exc:
             primary_error = str(exc)
             logger.warning("Primary RGB camera init failed: %s", exc)
@@ -886,7 +989,12 @@ def build_sensor_rig(camera_configs, enable_depth=True):
                 sidecar_camera = primary_camera
             else:
                 try:
-                    sidecar_camera = get_camera(sidecar_cfg, enable_depth=enable_depth)
+                    sidecar_camera = get_camera(
+                        sidecar_cfg,
+                        enable_depth=enable_depth,
+                        enable_color=True,
+                        enable_imu=bool(sidecar_cfg.get("type") == "realsense"),
+                    )
                     primary_camera = sidecar_camera
                     primary_error = None
                 except Exception as exc:
@@ -894,7 +1002,12 @@ def build_sensor_rig(camera_configs, enable_depth=True):
                     logger.warning("Sidecar depth/IMU camera init failed: %s", exc)
         else:
             try:
-                sidecar_camera = get_camera(sidecar_cfg, enable_depth=enable_depth)
+                sidecar_camera = get_camera(
+                    sidecar_cfg,
+                    enable_depth=enable_depth,
+                    enable_color=False if sidecar_cfg.get("type") == "realsense" else True,
+                    enable_imu=bool(sidecar_cfg.get("type") == "realsense"),
+                )
             except Exception as exc:
                 sidecar_error = str(exc)
                 logger.warning("Sidecar depth/IMU camera init failed: %s", exc)

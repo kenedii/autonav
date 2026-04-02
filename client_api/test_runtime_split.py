@@ -338,13 +338,51 @@ def test_csi_camera_falls_back_to_gi_gstreamer_backend():
     assert imu is None
 
 
+def test_build_sensor_rig_uses_depth_only_sidecar_realsense_when_primary_is_csi():
+    configs = [
+        {"role": "primary_rgb", "type": "csi", "sensor_id": 0, "enabled": True},
+        {"role": "sidecar_depth_imu", "type": "realsense", "enabled": True},
+    ]
+    calls = []
+
+    def fake_get_camera(config, enable_depth=True, enable_color=True, enable_imu=True):
+        calls.append({
+            "role": config.get("role"),
+            "type": config.get("type"),
+            "enable_depth": enable_depth,
+            "enable_color": enable_color,
+            "enable_imu": enable_imu,
+        })
+        return StubCamera()
+
+    with patch.object(hardware, "get_camera", side_effect=fake_get_camera):
+        rig = hardware.build_sensor_rig(configs, enable_depth=True)
+
+    assert rig.primary_rgb_camera is not None
+    assert rig.sidecar_depth_imu_sensor is not None
+    assert calls[0] == {
+        "role": "primary_rgb",
+        "type": "csi",
+        "enable_depth": False,
+        "enable_color": True,
+        "enable_imu": False,
+    }
+    assert calls[1] == {
+        "role": "sidecar_depth_imu",
+        "type": "realsense",
+        "enable_depth": True,
+        "enable_color": False,
+        "enable_imu": True,
+    }
+
+
 def test_build_sensor_rig_keeps_sidecar_observable_when_primary_init_fails():
     configs = [
         {"role": "primary_rgb", "type": "csi", "sensor_id": 0, "enabled": True},
         {"role": "sidecar_depth_imu", "type": "realsense", "enabled": True},
     ]
 
-    def fake_get_camera(config, enable_depth=True):
+    def fake_get_camera(config, enable_depth=True, enable_color=True, enable_imu=True):
         if config.get("role") == "primary_rgb":
             raise RuntimeError("CAM0 init failed")
         return StubCamera(depth=np.full((10, 10), 1000, dtype=np.uint16), imu={})
