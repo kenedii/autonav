@@ -451,35 +451,43 @@ if not USE_NETWORK_CONTROLLER:
     print(f"Joystick detected: {joystick.get_name()}")
 
 # ================= CONTROL MODE SELECTION =================
-print("\nChoose control mode:")
-print("1: Left joystick only (horizontal: steer, vertical: throttle)")
-print("2: Left joystick for steer (horizontal), Right joystick for throttle (vertical)")
-print("3: Left joystick for steer (horizontal), Right trigger for accelerate, Left trigger for brake/reverse")
 USE_LEFT_TRIGGER_ONLY = False
-if args.control_mode == 'steer_trigger':
-    # Non-interactive override: use steering on stick and left trigger for accelerate
-    mode = 3
-    USE_LEFT_TRIGGER_ONLY = True
-    print("Selected control_mode=steer_trigger: steering by stick, left trigger for accel")
+mode = 1
+if USE_NETWORK_CONTROLLER:
+    print("\nNetwork controller mode active.")
+    print("Local control-mode prompt skipped; mapping is defined by net_controller_client.py on the remote computer.")
+    print("For left-stick steering + RT accelerate + LT brake/reverse, start the sender with USE_TRIGGERS_MODE3=true.")
+    if args.control_mode == 'steer_trigger':
+        print("Note: --control_mode=steer_trigger only applies to local-controller mode and is ignored here.")
 else:
-    while True:
-        mode_choice = input("Enter 1, 2, or 3: ").strip()
-        if mode_choice == '1':
-            cfg.THROTTLE_AXIS = cfg.THROTTLE_AXIS
-            mode = 1
-            print("Selected Mode 1: Left joystick controls both steering and throttle.")
-            break
-        elif mode_choice == '2':
-            cfg.THROTTLE_AXIS = cfg.RIGHT_THROTTLE_AXIS
-            mode = 2
-            print("Selected Mode 2: Left joystick for steering, Right joystick for throttle.")
-            break
-        elif mode_choice == '3':
-            mode = 3
-            print("Selected Mode 3: Left joystick for steering, RT/LT for accelerate/brake (normalized).")
-            break
-        else:
-            print("Invalid choice. Please enter 1, 2, or 3.")
+    print("\nChoose control mode:")
+    print("1: Left joystick only (horizontal: steer, vertical: throttle)")
+    print("2: Left joystick for steer (horizontal), Right joystick for throttle (vertical)")
+    print("3: Left joystick for steer (horizontal), Right trigger for accelerate, Left trigger for brake/reverse")
+    if args.control_mode == 'steer_trigger':
+        # Non-interactive override: use steering on stick and left trigger for accelerate
+        mode = 3
+        USE_LEFT_TRIGGER_ONLY = True
+        print("Selected control_mode=steer_trigger: steering by stick, left trigger for accel")
+    else:
+        while True:
+            mode_choice = input("Enter 1, 2, or 3: ").strip()
+            if mode_choice == '1':
+                cfg.THROTTLE_AXIS = cfg.THROTTLE_AXIS
+                mode = 1
+                print("Selected Mode 1: Left joystick controls both steering and throttle.")
+                break
+            elif mode_choice == '2':
+                cfg.THROTTLE_AXIS = cfg.RIGHT_THROTTLE_AXIS
+                mode = 2
+                print("Selected Mode 2: Left joystick for steering, Right joystick for throttle.")
+                break
+            elif mode_choice == '3':
+                mode = 3
+                print("Selected Mode 3: Left joystick for steering, RT/LT for accelerate/brake (normalized).")
+                break
+            else:
+                print("Invalid choice. Please enter 1, 2, or 3.")
 
 # ================= STEERING LIMIT SELECTION =================
 steering_limit_input = input("\nEnter steering limit % (1-100, enter for 100): ").strip()
