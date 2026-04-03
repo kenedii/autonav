@@ -70,121 +70,73 @@
                             <span class="status-pill" id="detail-status">Online</span>
                             <button class="btn-danger-outline" onclick="deleteCar()">Remove</button>
                         </div>
-                        <div class="inline-status" id="operator-status">Ready.</div>
                         
                         <div class="client-tabs-nav">
                             <button class="client-tab-btn active" onclick="openClientTab('overview')">Overview</button>
                             <button class="client-tab-btn" onclick="openClientTab('specs')">Specs</button>
+                            <button class="client-tab-btn" onclick="openClientTab('video')">📷 Live Feed</button>
+                            <button class="client-tab-btn" onclick="openClientTab('logs')">📋 Logs</button>
                         </div>
 
                         <div id="client-tab-overview" class="client-tab-pane active">
-                            <div class="operator-layout">
-                                <div class="operator-main">
-                                    <div class="preview-panel control-group">
-                                        <div class="panel-heading">
-                                            <div>
-                                                <h3>CAM0 Forward Preview</h3>
-                                                <p class="panel-subtitle">Forward control, AprilTags, and preview all use CAM0.</p>
-                                            </div>
-                                            <div class="badge-row">
-                                                <span class="status-badge" id="mission-state-badge">IDLE</span>
-                                                <span class="status-badge neutral" id="stop-reason-badge">No stop reason</span>
-                                            </div>
-                                        </div>
-                                        <div class="preview-frame">
-                                            <img id="live-preview" alt="CAM0 forward preview" />
-                                            <div class="preview-placeholder" id="preview-placeholder">CAM0 forward preview will appear when the car is selected.</div>
-                                        </div>
-                                        <div class="preview-meta">
-                                            <div><strong>Mission:</strong> <span id="mission-route">expo_route</span></div>
-                                            <div><strong>Vehicle:</strong> <span id="detail-activity">Idle</span></div>
-                                            <div><strong>FPS:</strong> <span id="detail-fps">0</span></div>
-                                        </div>
-                                        <div class="validation-strip" aria-label="runtime validation summary">
-                                            <span class="validation-item"><strong>Tag Detector</strong> <span class="status-badge neutral" id="validation-tag-status">Unknown</span></span>
-                                            <span class="validation-item"><strong>Control Model</strong> <span class="status-badge neutral" id="validation-model-status">Unknown</span></span>
-                                            <span class="validation-item"><strong>Depth</strong> <span class="status-badge neutral" id="validation-depth-status">Unknown</span></span>
-                                            <span class="validation-item"><strong>Stop Reason</strong> <span class="status-badge neutral" id="validation-stop-reason">No stop reason</span></span>
-                                        </div>
-                                    </div>
-
-                                    <div class="control-group sensor-panel">
-                                        <div class="panel-heading">
-                                            <div>
-                                                <h3>Sensor Roles</h3>
-                                                <p class="panel-subtitle">CAM0 drives forward control. RealSense stays sidecar-only.</p>
-                                            </div>
-                                            <span class="status-badge neutral" id="forward-preview-role-badge">CAM0</span>
-                                        </div>
-                                        <div class="sensor-health-strip" id="sensor-health-strip" aria-label="sensor health summary"></div>
-                                        <div id="sensor-rig-panel" class="sensor-rig-grid">
-                                            <!-- Populated by JS -->
-                                        </div>
-                                    </div>
-
-                                    <div class="mission-grid">
-                                        <div class="control-group">
-                                            <h3>Mission State</h3>
-                                            <div class="detail-info">
-                                                <p><strong>IP Address:</strong> <span id="detail-ip"></span></p>
-                                                <p><strong>Location:</strong> <span id="detail-geo"></span></p>
-                                                <p><strong>Tag Detector:</strong> <span id="mission-tag-status">Unknown</span></p>
-                                                <p><strong>Obstacle Distance:</strong> <span id="obstacle-distance">N/A</span></p>
-                                                <p><strong>Last Tag:</strong> <span id="last-tag">N/A</span></p>
-                                                <p><strong>Last Action:</strong> <span id="last-action">N/A</span></p>
-                                                <div id="imu-info" class="metric-stack">
-                                                    <p><strong>IMU Accel:</strong> <span id="imu-accel">N/A</span></p>
-                                                    <p><strong>IMU Gyro:</strong> <span id="imu-gyro">N/A</span></p>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <div class="control-group">
-                                            <h3>Route Progress</h3>
-                                            <div class="route-grid">
-                                                <div><span class="route-label">Start seen</span><span id="route-start-seen" class="route-value">No</span></div>
-                                                <div><span class="route-label">Checkpoint seen</span><span id="route-checkpoint-seen" class="route-value">No</span></div>
-                                                <div><span class="route-label">Goal seen</span><span id="route-goal-seen" class="route-value">No</span></div>
-                                                <div><span class="route-label">Expected next tag</span><span id="route-expected-next" class="route-value">20</span></div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div class="operator-sidebar">
-                                    <div class="control-group">
-                                        <h3>Live Controls</h3>
-                                        <div class="btn-row">
-                                            <button class="btn-success" onclick="controlAction('start')">START</button>
-                                            <button class="btn-warning" onclick="controlAction('pause')">PAUSE</button>
-                                            <button class="btn-danger" onclick="controlAction('stop')">STOP</button>
-                                            <button class="btn-primary" onclick="controlAction('resume')">RESUME</button>
-                                        </div>
-                                    </div>
-
-                                    <div class="control-group">
-                                        <h3>System Configuration</h3>
-                                        <button class="btn-secondary" onclick="openConfigModal()">Edit Configuration</button>
-                                    </div>
-
-                                    <div class="control-group">
-                                        <h3>Live Detections</h3>
-                                        <ul id="detection-list" class="data-list">
-                                            <li>No objects detected</li>
-                                        </ul>
-                                    </div>
-
-                                    <div class="control-group">
-                                        <h3>Mission Logs</h3>
-                                        <div class="log-panel" id="mission-log-panel">
-                                            <ul id="mission-log-list" class="log-list">
-                                                <li>No logs yet.</li>
-                                            </ul>
-                                        </div>
-                                    </div>
-                                    </div>
+                            <div class="detail-info">
+                                <p><strong>IP Address:</strong> <span id="detail-ip"></span></p>
+                                <p><strong>Location:</strong> <span id="detail-geo"></span></p>
+                                <p><strong>Activity:</strong> <span id="detail-activity">Idle</span></p>
+                                <p><strong>FPS:</strong> <span id="detail-fps">0</span></p>
+                                <div id="imu-info" style="margin-top:5px; font-size:0.9em; color:#bbb;">
+                                    <p><strong>IMU Accel:</strong> <span id="imu-accel">N/A</span></p>
+                                    <p><strong>IMU Gyro:</strong> <span id="imu-gyro">N/A</span></p>
                                 </div>
                             </div>
+    
+                            <div class="control-group">
+                                <h3>Live Controls</h3>
+                                <div class="btn-row">
+                                    <button class="btn-success" onclick="controlAction('start')">START</button>
+                                    <button class="btn-warning" onclick="controlAction('pause')">PAUSE</button>
+                                    <button class="btn-danger" onclick="controlAction('stop')">STOP</button>
+                                    <button class="btn-primary" onclick="controlAction('resume')">RESUME</button>
+                                </div>
+                            </div>
+
+                            <div class="control-group">
+                                <h3>Tuning</h3>
+                                <div class="form-row">
+                                    <label>Mode:</label>
+                                    <select id="tune-mode" onchange="updateSettings()">
+                                        <option value="fixed">Fixed Throttle</option>
+                                    <option value="ai">AI Control</option>
+                                </select>
+                            </div>
+                            <div class="form-row">
+                                <label>Throttle:</label>
+                                <input type="number" id="tune-throttle" step="0.01" value="0.22" onchange="updateSettings()">
+                            </div>
+                        </div>
+                        
+                        <div class="control-group">
+                            <h3>System Configuration</h3>
+                            <button class="btn-secondary" onclick="openConfigModal()">Edit Configuration</button>
+                        </div>
+
+                        <div class="control-group">
+                            <h3>Live Detections</h3>
+                            <ul id="detection-list">
+                                <li>No objects detected</li>
+                            </ul>
+                        </div>
+
+                        <!-- New Panel for SLAM / Map -->
+                        <div class="control-group">
+                            <h3>Map / SLAM</h3>
+                            <canvas id="slam-map" width="400" height="300" style="border:1px solid #333; background:#000;"></canvas>
+                            <div class="slam-controls">
+                                <p>Click on map to set destination</p>
+                                <button class="btn-danger-outline" onclick="cancelNavigation()">Cancel Nav</button>
+                                <div id="slam-coords">X: 0.0 Y: 0.0 &theta;: 0.0</div>
+                            </div>
+                        </div>
                     </div> <!-- End of client-tab-overview -->
 
                     <div id="client-tab-specs" class="client-tab-pane" style="display:none; padding:1rem;">
@@ -197,6 +149,60 @@
                             <tr><td><strong>ResNet Version:</strong></td><td id="spec-resnet">Loading...</td></tr>
                             <tr><td><strong>YOLO Version:</strong></td><td id="spec-yolo">Loading...</td></tr>
                         </table>
+                    </div>
+
+                    <!-- Video Feed Tab -->
+                    <div id="client-tab-video" class="client-tab-pane" style="display:none; padding:1rem;">
+                        <h3>Live Camera Feed</h3>
+                        <p style="color:#d9534f; font-size:0.85em; margin-bottom:0.75rem; font-weight:bold;">
+                            Note: Accessing the video feed at high FPS may severely impact the performance of other tasks such as navigation and model inference.
+                        </p>
+                        <div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem;">
+                            <span id="video-status" style="color:#888; font-size:0.9em;">Stopped</span>
+                            <select id="camera-select" style="padding:4px; border-radius:4px; max-width: 150px;">
+                                <option value="0">Camera 0</option>
+                            </select>
+                            <label for="fps-select" style="font-size:0.9em; font-weight:bold;">FPS:</label>
+                            <select id="fps-select" style="padding:4px; border-radius:4px;">
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="5" selected>5</option>
+                                <option value="10">10</option>
+                                <option value="15">15</option>
+                            </select>
+                            <button class="btn-success" onclick="startVideoStream()">▶ Start</button>
+                            <button class="btn-danger-outline" onclick="stopVideoStream()">■ Stop</button>
+                        </div>
+                        <div style="background:#000; display:inline-block; border:1px solid #333; border-radius:6px; overflow:hidden;">
+                            <canvas id="video-canvas" width="640" height="480"
+                                    style="display:block; max-width:100%;"></canvas>
+                        </div>
+                        <p style="color:#666; font-size:0.8em; margin-top:0.5rem;">
+                            Stream is encrypted end-to-end with Fernet AES-128 (derived from the car password).
+                        </p>
+                    </div>
+
+                    <!-- Logs Tab -->
+                    <div id="client-tab-logs" class="client-tab-pane" style="display:none; padding:1rem;">
+                        <div class="log-panel-header">
+                            <h3 style="margin:0;">Live Logs</h3>
+                            <div class="log-toolbar">
+                                <label class="log-filter-label">
+                                    <input type="checkbox" id="log-autoscroll" checked> Auto-scroll
+                                </label>
+                                <select id="log-level-filter" onchange="renderLogs()">
+                                    <option value="ALL">All levels</option>
+                                    <option value="DEBUG">DEBUG+</option>
+                                    <option value="INFO">INFO+</option>
+                                    <option value="WARN">WARN+</option>
+                                    <option value="ERROR">ERROR+</option>
+                                </select>
+                                <button class="btn-secondary" onclick="clearLogs()">Clear</button>
+                                <button class="btn-primary" onclick="saveLog()">⬇ Save Log</button>
+                            </div>
+                        </div>
+                        <div id="log-output" class="log-output"></div>
+                        <div id="log-empty" class="log-empty" style="display:none;">No log entries yet.</div>
                     </div>
                 </div> <!-- End of car-detail-content -->
                 </div>
@@ -243,9 +249,10 @@
     <div id="add-modal" class="modal">
         <div class="modal-content">
             <h3>Add New Car</h3>
-            <input type="text" id="new-name" placeholder="Car Name (e.g. Racer 1)">
-            <input type="text" id="new-ip" placeholder="IP Address (e.g. 192.168.1.50)">
-            <input type="number" id="new-port" placeholder="Port" value="8000">
+            <input type="text"     id="new-name" placeholder="Car Name (e.g. Racer 1)">
+            <input type="text"     id="new-ip"   placeholder="IP Address (e.g. 192.168.1.50)">
+            <input type="number"   id="new-port" placeholder="Port" value="8000">
+            <input type="password" id="new-password" placeholder="Password (must match car)">
             <div class="modal-actions">
                 <button class="btn-secondary" onclick="closeAddModal()">Cancel</button>
                 <button class="btn-primary" onclick="addCar()">Add</button>
@@ -259,66 +266,16 @@
             <h3>Edit Car Configuration</h3>
             <div class="scroll-form" style="max-height: 60vh; overflow-y: auto; margin-bottom: 1rem;">
                 
-                <h4>Camera Roles</h4>
-                <div class="role-grid">
-                    <div class="camera-role-card" data-role="primary_rgb">
-                        <div class="role-header">
-                            <h5>CAM0 Primary RGB</h5>
-                            <span class="status-badge ok">forward</span>
-                        </div>
-                        <div class="form-row"><label>Enabled:</label><input type="checkbox" id="cfg-primary-enabled" checked></div>
-                        <div class="form-row"><label>Type:</label>
-                            <select id="cfg-primary-type">
-                                <option value="csi">CSI</option>
-                                <option value="opencv">OpenCV</option>
-                                <option value="realsense">RealSense</option>
-                            </select>
-                        </div>
-                        <div class="form-row"><label>Sensor ID:</label><input type="number" id="cfg-primary-sensor-id" value="0"></div>
-                        <div class="form-row"><label>Width:</label><input type="number" id="cfg-primary-w" value="640"></div>
-                        <div class="form-row"><label>Height:</label><input type="number" id="cfg-primary-h" value="480"></div>
-                        <div class="form-row"><label>FPS:</label><input type="number" id="cfg-primary-fps" value="15"></div>
-                        <div class="form-row"><label>Flip Method:</label><input type="number" id="cfg-primary-flip" value="2"></div>
-                    </div>
-
-                    <div class="camera-role-card" data-role="sidecar_depth_imu">
-                        <div class="role-header">
-                            <h5>RealSense Sidecar Depth/IMU</h5>
-                            <span class="status-badge neutral">sidecar</span>
-                        </div>
-                        <div class="form-row"><label>Enabled:</label><input type="checkbox" id="cfg-sidecar-enabled" checked></div>
-                        <div class="form-row"><label>Type:</label>
-                            <select id="cfg-sidecar-type">
-                                <option value="realsense">RealSense</option>
-                                <option value="csi">CSI</option>
-                                <option value="opencv">OpenCV</option>
-                            </select>
-                        </div>
-                        <div class="form-row"><label>Width:</label><input type="number" id="cfg-sidecar-w" value="640"></div>
-                        <div class="form-row"><label>Height:</label><input type="number" id="cfg-sidecar-h" value="480"></div>
-                        <div class="form-row"><label>FPS:</label><input type="number" id="cfg-sidecar-fps" value="15"></div>
-                    </div>
-
-                    <div class="camera-role-card" data-role="rear_preview">
-                        <div class="role-header">
-                            <h5>CAM1 Rear Preview</h5>
-                            <span class="status-badge neutral">reverse-only</span>
-                        </div>
-                        <div class="form-row"><label>Enabled:</label><input type="checkbox" id="cfg-rear-enabled"></div>
-                        <div class="form-row"><label>Type:</label>
-                            <select id="cfg-rear-type">
-                                <option value="csi">CSI</option>
-                                <option value="opencv">OpenCV</option>
-                                <option value="realsense">RealSense</option>
-                            </select>
-                        </div>
-                        <div class="form-row"><label>Sensor ID:</label><input type="number" id="cfg-rear-sensor-id" value="1"></div>
-                        <div class="form-row"><label>Width:</label><input type="number" id="cfg-rear-w" value="640"></div>
-                        <div class="form-row"><label>Height:</label><input type="number" id="cfg-rear-h" value="480"></div>
-                        <div class="form-row"><label>FPS:</label><input type="number" id="cfg-rear-fps" value="15"></div>
-                        <div class="form-row"><label>Flip Method:</label><input type="number" id="cfg-rear-flip" value="2"></div>
-                    </div>
+                <h4>Camera</h4>
+                <div class="form-row"><label>Type:</label>
+                    <select id="cfg-cam-type">
+                        <option value="opencv">OpenCV</option>
+                        <option value="realsense">RealSense</option>
+                    </select>
                 </div>
+                 <div class="form-row"><label>Width:</label><input type="number" id="cfg-cam-w" value="640"></div>
+                 <div class="form-row"><label>Height:</label><input type="number" id="cfg-cam-h" value="480"></div>
+                 <div class="form-row"><label>FPS:</label><input type="number" id="cfg-cam-fps" value="30"></div>
                  
                  <h4>Models</h4>
                  <div class="form-row"><label>Control Backend:</label>
