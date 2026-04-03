@@ -25,15 +25,60 @@ import numpy as np
 import select
 import argparse
 import queue
+import sys
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
+if REPO_ROOT not in sys.path:
+    sys.path.append(REPO_ROOT)
+
+from preprocess_utils import (
+    apply_preprocess_profile,
+    LEGACY_PREPROCESS_PROFILE,
+    infer_preprocess_profile,
+    PREPROCESS_OUTPUT_HEIGHT,
+    PREPROCESS_OUTPUT_WIDTH,
+)
+
+try:
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    GST_AVAILABLE = True
+except Exception:
+    Gst = None
+    GST_AVAILABLE = False
 
 # ================= ARGS =================
 parser = argparse.ArgumentParser()
 parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type")
 parser.add_argument("--device", type=int, default=0, help="Camera device ID (for opencv)")
+parser.add_argument('--primary_rgb_source', type=str, default='main_camera', choices=['main_camera', 'cam0'], help='Primary RGB source for canonical rgb_path')
 parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+depth')
 parser.add_argument('--control_mode', type=str, default=None, choices=['joystick', 'steer_trigger'], help='Optional override for control mapping: "steer_trigger" uses left trigger for accel')
 parser.add_argument('--always_save', action='store_true', help='Save frames at TARGET_FPS even when controls have not changed')
+parser.add_argument('--view_360', action='store_true', help='Also record two Jetson CSI cameras connected to CAM0/CAM1')
+parser.add_argument('--view_360_cam0_sensor_id', type=int, default=0, help='Jetson CSI sensor-id for the CAM0 360 camera')
+parser.add_argument('--view_360_cam1_sensor_id', type=int, default=1, help='Jetson CSI sensor-id for the CAM1 360 camera')
+parser.add_argument('--view_360_width', type=int, default=640, help='Capture width for the 360 cameras')
+parser.add_argument('--view_360_height', type=int, default=480, help='Capture height for the 360 cameras')
+parser.add_argument('--view_360_fps', type=int, default=15, help='Capture FPS for the 360 cameras')
+parser.add_argument('--view_360_save_width', type=int, default=320, help='Saved width for the 360 camera images')
+parser.add_argument('--view_360_save_height', type=int, default=240, help='Saved height for the 360 camera images')
+parser.add_argument('--view_360_cam0_flip_method', type=int, default=2, help='nvvidconv flip-method for CAM0 (0-7)')
+parser.add_argument('--view_360_cam1_flip_method', type=int, default=2, help='nvvidconv flip-method for CAM1 (0-7)')
 args = parser.parse_args()
+
+PRIMARY_RGB_SOURCE = args.primary_rgb_source
+PRIMARY_RGB_IS_CAM0 = PRIMARY_RGB_SOURCE == "cam0"
+PREPROCESS_PROFILE = infer_preprocess_profile(
+    camera_configs=[
+        {"role": "primary_rgb", "type": "csi"} if PRIMARY_RGB_IS_CAM0 else {"role": "primary_rgb", "type": args.camera}
+    ],
+)
+DEFAULT_OUTPUT_SIZE = (PREPROCESS_OUTPUT_WIDTH, PREPROCESS_OUTPUT_HEIGHT)
+RUN_ID = None
 
 if args.camera in ["opencv", "other"]:
     realsense_full.set_camera_type("opencv", args.device)
@@ -71,7 +116,7 @@ class Config:
     PWM_FREQ = 50
     IMG_WIDTH = 160
     IMG_HEIGHT = 120
-    TARGET_FPS = 2
+    TARGET_FPS = 5
     DELETE_N_FRAMES = 12
 
     # Safety scaling (set to safe defaults; change if needed)
@@ -85,6 +130,265 @@ class Config:
     AXIS_DEADZONE = 0.03
 
 cfg = Config()
+
+
+class CsiCameraStream:
+    """Low-latency Jetson CSI camera reader backed by nvarguscamerasrc."""
+
+    def __init__(self, sensor_id, width, height, fps, flip_method=0, label="CAM"):
+        self.sensor_id = sensor_id
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.flip_method = flip_method
+        self.label = label
+        self.cap = None
+        self.pipeline = None
+        self.appsink = None
+        self.backend = None
+        self.thread = None
+        self.stop_event = threading.Event()
+        self.frame_lock = threading.Lock()
+        self.latest_frame = None
+
+    @staticmethod
+    def build_pipeline(sensor_id, width, height, fps, flip_method, appsink_name=None):
+        appsink = "appsink drop=true max-buffers=1 sync=false"
+        if appsink_name is not None:
+            appsink = (
+                f"appsink name={appsink_name} emit-signals=false "
+                "drop=true max-buffers=1 sync=false"
+            )
+
+        return (
+            f"nvarguscamerasrc sensor-id={sensor_id} ! "
+            "video/x-raw(memory:NVMM), "
+            f"width=(int){width}, height=(int){height}, "
+            f"format=(string)NV12, framerate=(fraction){fps}/1 ! "
+            f"nvvidconv flip-method={flip_method} ! "
+            f"video/x-raw, width=(int){width}, height=(int){height}, format=(string)BGRx ! "
+            "videoconvert ! "
+            "video/x-raw, format=(string)BGR ! "
+            f"{appsink}"
+        )
+
+    def start(self):
+        if self.cap is not None or self.pipeline is not None:
+            return True
+
+        self.stop_event.clear()
+        started = False
+
+        if GST_AVAILABLE:
+            started = self._start_native_gstreamer()
+
+        if not started:
+            started = self._start_opencv_gstreamer()
+
+        if not started:
+            print(f"[360] Failed to open {self.label} on sensor-id={self.sensor_id}")
+            return False
+
+        self.thread = threading.Thread(target=self._reader, daemon=True)
+        self.thread.start()
+        print(
+            f"[360] {self.label} started on sensor-id={self.sensor_id} using {self.backend} "
+            f"({self.width}x{self.height}@{self.fps}, flip={self.flip_method})"
+        )
+        return True
+
+    def _start_native_gstreamer(self):
+        try:
+            pipeline_desc = self.build_pipeline(
+                self.sensor_id,
+                self.width,
+                self.height,
+                self.fps,
+                self.flip_method,
+                appsink_name="capture_sink",
+            )
+            self.pipeline = Gst.parse_launch(pipeline_desc)
+            self.appsink = self.pipeline.get_by_name("capture_sink")
+            if self.appsink is None:
+                raise RuntimeError("appsink not found in GStreamer pipeline")
+
+            state_ret = self.pipeline.set_state(Gst.State.PLAYING)
+            if state_ret == Gst.StateChangeReturn.FAILURE:
+                raise RuntimeError("pipeline failed to enter PLAYING state")
+
+            self.backend = "python-gstreamer"
+            return True
+        except Exception as e:
+            print(f"[360] {self.label} native GStreamer open failed: {e}")
+            if self.pipeline is not None:
+                try:
+                    self.pipeline.set_state(Gst.State.NULL)
+                except Exception:
+                    pass
+            self.pipeline = None
+            self.appsink = None
+            self.backend = None
+            return False
+
+    def _start_opencv_gstreamer(self):
+        pipeline = self.build_pipeline(
+            self.sensor_id,
+            self.width,
+            self.height,
+            self.fps,
+            self.flip_method,
+        )
+        self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if not self.cap.isOpened():
+            self.cap.release()
+            self.cap = None
+            return False
+
+        self.backend = "opencv-gstreamer"
+        return True
+
+    def _pull_gstreamer_sample(self):
+        if self.appsink is None:
+            return None
+
+        sample = self.appsink.emit("try-pull-sample", 200000000)
+        if sample is None:
+            return None
+
+        return self._sample_to_bgr(sample)
+
+    @staticmethod
+    def _sample_to_bgr(sample):
+        caps = sample.get_caps()
+        if caps is None or caps.get_size() == 0:
+            return None
+
+        structure = caps.get_structure(0)
+        width = structure.get_value("width")
+        height = structure.get_value("height")
+        pixel_format = structure.get_value("format")
+
+        buffer = sample.get_buffer()
+        if buffer is None:
+            return None
+
+        ok, map_info = buffer.map(Gst.MapFlags.READ)
+        if not ok:
+            return None
+
+        try:
+            channels = 3 if pixel_format == "BGR" else 4 if pixel_format == "BGRx" else None
+            if channels is None:
+                return None
+
+            data = np.frombuffer(map_info.data, dtype=np.uint8)
+            row_stride = data.size // height if height else 0
+            if row_stride < width * channels:
+                return None
+
+            frame = data.reshape((height, row_stride))
+            frame = frame[:, : width * channels]
+            frame = frame.reshape((height, width, channels))
+            if channels == 4:
+                frame = frame[:, :, :3]
+            return frame.copy()
+        finally:
+            buffer.unmap(map_info)
+
+    def _reader(self):
+        while not self.stop_event.is_set():
+            if self.backend == "python-gstreamer":
+                frame = self._pull_gstreamer_sample()
+            else:
+                if self.cap is None:
+                    break
+                ok, frame = self.cap.read()
+                if not ok:
+                    frame = None
+
+            if frame is None:
+                time.sleep(0.02)
+                continue
+
+            with self.frame_lock:
+                self.latest_frame = frame.copy()
+
+    def get_frame(self):
+        with self.frame_lock:
+            if self.latest_frame is None:
+                return None
+            return self.latest_frame.copy()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        if self.pipeline is not None:
+            try:
+                self.pipeline.set_state(Gst.State.NULL)
+            except Exception:
+                pass
+            self.pipeline = None
+        self.appsink = None
+        self.backend = None
+        self.thread = None
+
+
+class CsiRigCapture:
+    def __init__(self, enable_cam0=True, enable_cam1=True):
+        self.enable_cam0 = enable_cam0
+        self.enable_cam1 = enable_cam1
+        self.cam0 = None
+        self.cam1 = None
+        self.cam0_ok = False
+        self.cam1_ok = False
+        self.enabled = False
+
+        if self.enable_cam0:
+            self.cam0 = CsiCameraStream(
+                sensor_id=args.view_360_cam0_sensor_id,
+                width=args.view_360_width,
+                height=args.view_360_height,
+                fps=args.view_360_fps,
+                flip_method=args.view_360_cam0_flip_method,
+                label="CAM0",
+            )
+        if self.enable_cam1:
+            self.cam1 = CsiCameraStream(
+                sensor_id=args.view_360_cam1_sensor_id,
+                width=args.view_360_width,
+                height=args.view_360_height,
+                fps=args.view_360_fps,
+                flip_method=args.view_360_cam1_flip_method,
+                label="CAM1",
+            )
+
+    def start(self):
+        if self.cam0 is not None:
+            self.cam0_ok = self.cam0.start()
+        if self.cam1 is not None:
+            self.cam1_ok = self.cam1.start()
+        self.enabled = bool(self.cam0_ok or self.cam1_ok)
+        if self.enable_cam0 and not self.cam0_ok:
+            print("[360] CAM0 failed to start.")
+        if self.enable_cam1 and not self.cam1_ok:
+            print("[360] CAM1 failed to start.")
+        return self.enabled
+
+    def get_frames(self):
+        cam0_frame = self.cam0.get_frame() if self.cam0 is not None else None
+        cam1_frame = self.cam1.get_frame() if self.cam1 is not None else None
+        return cam0_frame, cam1_frame
+
+    def stop(self):
+        if self.cam0 is not None:
+            self.cam0.stop()
+        if self.cam1 is not None:
+            self.cam1.stop()
+        self.enabled = False
 
 # ================= PCA9685 (SMBus) =================
 class PCA9685:
@@ -147,35 +451,43 @@ if not USE_NETWORK_CONTROLLER:
     print(f"Joystick detected: {joystick.get_name()}")
 
 # ================= CONTROL MODE SELECTION =================
-print("\nChoose control mode:")
-print("1: Left joystick only (horizontal: steer, vertical: throttle)")
-print("2: Left joystick for steer (horizontal), Right joystick for throttle (vertical)")
-print("3: Left joystick for steer (horizontal), Right trigger for accelerate, Left trigger for brake/reverse")
 USE_LEFT_TRIGGER_ONLY = False
-if args.control_mode == 'steer_trigger':
-    # Non-interactive override: use steering on stick and left trigger for accelerate
-    mode = 3
-    USE_LEFT_TRIGGER_ONLY = True
-    print("Selected control_mode=steer_trigger: steering by stick, left trigger for accel")
+mode = 1
+if USE_NETWORK_CONTROLLER:
+    print("\nNetwork controller mode active.")
+    print("Local control-mode prompt skipped; mapping is defined by net_controller_client.py on the remote computer.")
+    print("For left-stick steering + RT accelerate + LT brake/reverse, start the sender with USE_TRIGGERS_MODE3=true.")
+    if args.control_mode == 'steer_trigger':
+        print("Note: --control_mode=steer_trigger only applies to local-controller mode and is ignored here.")
 else:
-    while True:
-        mode_choice = input("Enter 1, 2, or 3: ").strip()
-        if mode_choice == '1':
-            cfg.THROTTLE_AXIS = cfg.THROTTLE_AXIS
-            mode = 1
-            print("Selected Mode 1: Left joystick controls both steering and throttle.")
-            break
-        elif mode_choice == '2':
-            cfg.THROTTLE_AXIS = cfg.RIGHT_THROTTLE_AXIS
-            mode = 2
-            print("Selected Mode 2: Left joystick for steering, Right joystick for throttle.")
-            break
-        elif mode_choice == '3':
-            mode = 3
-            print("Selected Mode 3: Left joystick for steering, RT/LT for accelerate/brake (normalized).")
-            break
-        else:
-            print("Invalid choice. Please enter 1, 2, or 3.")
+    print("\nChoose control mode:")
+    print("1: Left joystick only (horizontal: steer, vertical: throttle)")
+    print("2: Left joystick for steer (horizontal), Right joystick for throttle (vertical)")
+    print("3: Left joystick for steer (horizontal), Right trigger for accelerate, Left trigger for brake/reverse")
+    if args.control_mode == 'steer_trigger':
+        # Non-interactive override: use steering on stick and left trigger for accelerate
+        mode = 3
+        USE_LEFT_TRIGGER_ONLY = True
+        print("Selected control_mode=steer_trigger: steering by stick, left trigger for accel")
+    else:
+        while True:
+            mode_choice = input("Enter 1, 2, or 3: ").strip()
+            if mode_choice == '1':
+                cfg.THROTTLE_AXIS = cfg.THROTTLE_AXIS
+                mode = 1
+                print("Selected Mode 1: Left joystick controls both steering and throttle.")
+                break
+            elif mode_choice == '2':
+                cfg.THROTTLE_AXIS = cfg.RIGHT_THROTTLE_AXIS
+                mode = 2
+                print("Selected Mode 2: Left joystick for steering, Right joystick for throttle.")
+                break
+            elif mode_choice == '3':
+                mode = 3
+                print("Selected Mode 3: Left joystick for steering, RT/LT for accelerate/brake (normalized).")
+                break
+            else:
+                print("Invalid choice. Please enter 1, 2, or 3.")
 
 # ================= STEERING LIMIT SELECTION =================
 steering_limit_input = input("\nEnter steering limit % (1-100, enter for 100): ").strip()
@@ -192,6 +504,19 @@ if steering_limit_input:
 else:
     print("Using 100% steering.")
 
+# ================= OPTIONAL 360 CSI CAMERAS =================
+cam_rig = None
+cam0_enabled = PRIMARY_RGB_IS_CAM0 or args.view_360
+cam1_enabled = args.view_360
+VIEW_360_ENABLED = False
+view_360_waiting_logged = False
+
+if (cam0_enabled or cam1_enabled) and CAMERA_ENABLED:
+    cam_rig = CsiRigCapture(enable_cam0=cam0_enabled, enable_cam1=cam1_enabled)
+    VIEW_360_ENABLED = cam_rig.start()
+elif cam0_enabled or cam1_enabled:
+    print("[360] CSI capture requested but CAMERA_ENABLED=False, so CAM0/CAM1 recording is disabled.")
+
 # ================= MULTI-SESSION SETUP =================
 BASE_RUN_DIR = "runs_rgb_depth"
 os.makedirs(BASE_RUN_DIR, exist_ok=True)
@@ -201,19 +526,64 @@ def create_new_session():
     os.makedirs(session_dir, exist_ok=True)
     return session_dir
 
+def get_dataset_header():
+    return [
+        "timestamp",
+        "steer_us",
+        "throttle_us",
+        "steer_norm",
+        "throttle_norm",
+        "depth_front",
+        "rgb_path",
+        "rgb_source",
+        "depth_source",
+        "imu_source",
+        "rear_rgb_source",
+        "preprocess_profile",
+        "run_id",
+        "session_id",
+        "cam0_path",
+        "cam1_path",
+        "ir_path",
+        "depth_path",
+    ]
+
 RUN_DIR = create_new_session()
+RUN_ID = os.path.basename(RUN_DIR)
 csv_path = os.path.join(RUN_DIR, "dataset.csv")
 csv_file = open(csv_path, "w", newline="")
 writer = csv.writer(csv_file)
-if args.record_mode == 'all' and args.camera == 'realsense':
-    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
-else:
-    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+writer.writerow(get_dataset_header())
 
 frame_idx = 0
 
 # ================= WRITER THREAD =================
 write_queue = queue.Queue(maxsize=100)
+
+def save_canonical_frame(image, path, profile, output_size=DEFAULT_OUTPUT_SIZE):
+    if image is None or path is None:
+        return
+
+    if output_size == DEFAULT_OUTPUT_SIZE:
+        image_small = apply_preprocess_profile(image, profile)
+    else:
+        image_small = cv2.resize(image, output_size)
+    cv2.imwrite(path, image_small)
+
+def build_row_metadata(rgb_source, depth_source, imu_source, rear_rgb_source, preprocess_profile, cam0_path, cam1_path, ir_path, depth_path):
+    return [
+        rgb_source,
+        depth_source,
+        imu_source,
+        rear_rgb_source,
+        preprocess_profile,
+        RUN_ID,
+        RUN_ID,
+        cam0_path,
+        cam1_path,
+        ir_path,
+        depth_path,
+    ]
 
 def writer_worker():
     global csv_file, writer
@@ -224,29 +594,41 @@ def writer_worker():
             continue
             
         if item is None:
+            write_queue.task_done()
             break
             
         cmd = item[0]
         
         if cmd == "FRAME":
-            _, rgb, row_data, rgb_path = item
+            _, rgb, row_data, rgb_path, rgb_profile, extra_frames = item
             try:
-                # Resize here to offload 'recording_worker'
-                rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
-                cv2.imwrite(rgb_path, rgb_small)
+                save_canonical_frame(rgb, rgb_path, rgb_profile)
+                for extra_path, extra_image in extra_frames:
+                    save_canonical_frame(
+                        extra_image,
+                        extra_path,
+                        LEGACY_PREPROCESS_PROFILE,
+                        output_size=(args.view_360_save_width, args.view_360_save_height),
+                    )
                 writer.writerow(row_data)
                 csv_file.flush()
             except Exception as e:
                 print(f"Write error: {e}")
         elif cmd == "FRAME_ALL":
-            _, rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path = item
+            _, rgb, ir_image, depth_map, row_data, rgb_path, rgb_profile, ir_path, depth_path, extra_frames = item
             try:
-                rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
-                cv2.imwrite(rgb_path, rgb_small)
+                save_canonical_frame(rgb, rgb_path, rgb_profile)
                 if ir_image is not None and ir_path is not None:
                     cv2.imwrite(ir_path, ir_image)
                 if depth_map is not None and depth_path is not None:
                     cv2.imwrite(depth_path, depth_map)
+                for extra_path, extra_image in extra_frames:
+                    save_canonical_frame(
+                        extra_image,
+                        extra_path,
+                        LEGACY_PREPROCESS_PROFILE,
+                        output_size=(args.view_360_save_width, args.view_360_save_height),
+                    )
                 writer.writerow(row_data)
                 csv_file.flush()
             except Exception as e:
@@ -280,26 +662,78 @@ def pwm_to_norm(us):
 
 def get_rgb_and_front_depth():
     if not CAMERA_ENABLED:
-        if args.record_mode == 'all' and args.camera == 'realsense':
-            return None, 0.0, None, None
-        return None, 0.0
+        return None, 0.0, None, None
 
-    # If user requested all frames and using RealSense, try to fetch RGB, IR and full depth map
-    if args.record_mode == 'all' and args.camera == 'realsense':
+    ir_image = None
+    depth_map = None
+    center_depth = 0.0
+    rgb = None
+
+    if PRIMARY_RGB_IS_CAM0:
+        if cam_rig is None or not cam_rig.cam0_ok:
+            return None, None, None, None
+
+    if args.camera == 'realsense' and hasattr(realsense_full, 'get_all_frames') and args.record_mode == 'all':
         if hasattr(realsense_full, 'get_all_frames'):
             rgb, center_depth, ir_image, depth_map = realsense_full.get_all_frames()
         else:
             rgb, center_depth = realsense_full.get_aligned_frames()
-            ir_image, depth_map = None, None
-        if rgb is None:
-            return None, None, None, None
-        return rgb, float(center_depth), ir_image, depth_map
+        center_depth = float(center_depth or 0.0)
+    else:
+        rgb, center_depth = realsense_full.get_aligned_frames()
+        center_depth = float(center_depth or 0.0)
 
-    # Default: RGB + single center depth
-    rgb, center_depth = realsense_full.get_aligned_frames()
+    if PRIMARY_RGB_IS_CAM0 and cam_rig is not None:
+        cam0_frame, _ = cam_rig.get_frames()
+        rgb = cam0_frame
+
     if rgb is None:
+        return None, None, None, None
+
+    if not (args.record_mode == 'all' and args.camera == 'realsense'):
+        ir_image = None
+        depth_map = None
+
+    return rgb, center_depth, ir_image, depth_map
+
+def get_view_360_capture(frame_number):
+    global view_360_waiting_logged
+
+    if not VIEW_360_ENABLED or cam_rig is None:
+        return [], []
+
+    cam0_frame, cam1_frame = cam_rig.get_frames()
+    extra_frames = []
+    extra_paths = []
+
+    if PRIMARY_RGB_IS_CAM0:
+        if cam1_frame is not None:
+            cam1_path = os.path.join(RUN_DIR, f"cam1_{frame_number:05d}.png")
+            extra_frames.append((cam1_path, cam1_frame))
+            extra_paths.append(cam1_path)
+        elif cam1_enabled and not view_360_waiting_logged:
+            print("\n[360] Waiting for CAM1 frames before saving rear-preview sidecar data...")
+            view_360_waiting_logged = True
+        view_360_waiting_logged = False if cam1_frame is not None else view_360_waiting_logged
+        return extra_frames, extra_paths
+
+    if cam0_frame is None and cam1_frame is None:
+        if not view_360_waiting_logged:
+            print("\n[360] Waiting for CAM0/CAM1 frames before saving synchronized 360 data...")
+            view_360_waiting_logged = True
         return None, None
-    return rgb, float(center_depth)
+
+    if cam0_frame is not None:
+        cam0_path = os.path.join(RUN_DIR, f"cam0_{frame_number:05d}.png")
+        extra_frames.append((cam0_path, cam0_frame))
+        extra_paths.append(cam0_path)
+    if cam1_frame is not None:
+        cam1_path = os.path.join(RUN_DIR, f"cam1_{frame_number:05d}.png")
+        extra_frames.append((cam1_path, cam1_frame))
+        extra_paths.append(cam1_path)
+
+    view_360_waiting_logged = False
+    return extra_frames, extra_paths
 
 def delete_last_n(n):
     global frame_idx
@@ -312,26 +746,25 @@ def delete_last_n(n):
     print(f"\nRequested delete of last {n} frames -> index reverted to {frame_idx}")
 
 def delete_current_session():
-    global frame_idx, RUN_DIR, csv_path, csv_file, writer
+    global frame_idx, RUN_DIR, RUN_ID, csv_path, csv_file, writer, recording, view_360_waiting_logged
     confirm = input(f"\nDelete current session '{RUN_DIR}'? [y/N]: ").strip().lower()
     if confirm == 'y':
-        # Clear queue
-        with write_queue.mutex:
-            write_queue.queue.clear()
-            
+        recording = False
+        print("\nDraining pending writes before deleting current session...")
+        write_queue.join()
+
         csv_file.close()
         for fname in os.listdir(RUN_DIR):
             os.remove(os.path.join(RUN_DIR, fname))
         os.rmdir(RUN_DIR)
         print(f"Session '{RUN_DIR}' deleted!")
         RUN_DIR = create_new_session()
+        RUN_ID = os.path.basename(RUN_DIR)
         csv_path = os.path.join(RUN_DIR, "dataset.csv")
         csv_file = open(csv_path, "w", newline="")
         writer = csv.writer(csv_file)
-        if args.record_mode == 'all' and args.camera == 'realsense':
-            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path","ir_path","depth_path"])
-        else:
-            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+        writer.writerow(get_dataset_header())
+        view_360_waiting_logged = False
         frame_idx = 0
 
 
@@ -418,41 +851,78 @@ def recording_worker():
                 
                 # Save if inputs changed beyond threshold OR user requested always-save
                 if args.always_save or abs(s_us - last_steer_rec) >= MIN_CHANGE_US or abs(t_us - last_throttle_rec) >= MIN_CHANGE_US:
-                        # Fetch frame(s) according to requested record_mode
-                        if args.record_mode == 'all' and args.camera == 'realsense':
-                            rgb, depth_front, ir_image, depth_map = get_rgb_and_front_depth()
-                            if rgb is not None:
+                        rgb, depth_front, ir_image, depth_map = get_rgb_and_front_depth()
+                        if rgb is not None:
+                            extra_frames, extra_paths = get_view_360_capture(frame_idx)
+                            if extra_frames is None:
+                                time.sleep(0.005)
+                                continue
+
+                            rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                            ir_path = os.path.join(RUN_DIR, f"ir_{frame_idx:05d}.png") if ir_image is not None else None
+                            depth_path = os.path.join(RUN_DIR, f"depth_{frame_idx:05d}.png") if depth_map is not None else None
+
+                            rgb_source = "cam0" if PRIMARY_RGB_IS_CAM0 else ("realsense" if args.camera == "realsense" else "opencv")
+                            depth_source = "realsense_d435i" if args.camera == "realsense" else "opencv"
+                            imu_source = depth_source
+                            rear_rgb_source = "cam1" if any(
+                                os.path.basename(extra_path).startswith("cam1_")
+                                for extra_path in extra_paths
+                            ) else "none"
+
+                            cam0_path = rgb_path if PRIMARY_RGB_IS_CAM0 else next((p for p in extra_paths if os.path.basename(p).startswith("cam0_")), "")
+                            cam1_path = next((p for p in extra_paths if os.path.basename(p).startswith("cam1_")), "")
+                            row_data = [
+                                time.time(),
+                                s_us,
+                                t_us,
+                                pwm_to_norm(s_us),
+                                pwm_to_norm(t_us),
+                                depth_front,
+                                rgb_path,
+                                *build_row_metadata(
+                                    rgb_source,
+                                    depth_source,
+                                    imu_source,
+                                    rear_rgb_source,
+                                    PREPROCESS_PROFILE,
+                                    cam0_path,
+                                    cam1_path,
+                                    ir_path,
+                                    depth_path,
+                                ),
+                            ]
+                            if not write_queue.full():
+                                cmd = "FRAME_ALL" if ir_image is not None or depth_map is not None else "FRAME"
+                                if cmd == "FRAME_ALL":
+                                    write_queue.put((
+                                        "FRAME_ALL",
+                                        rgb,
+                                        ir_image,
+                                        depth_map,
+                                        row_data,
+                                        rgb_path,
+                                        PREPROCESS_PROFILE,
+                                        ir_path,
+                                        depth_path,
+                                        extra_frames,
+                                    ))
+                                else:
+                                    write_queue.put((
+                                        "FRAME",
+                                        rgb,
+                                        row_data,
+                                        rgb_path,
+                                        PREPROCESS_PROFILE,
+                                        extra_frames,
+                                    ))
                                 last_steer_rec = s_us
                                 last_throttle_rec = t_us
-                                rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
-                                ir_path = os.path.join(RUN_DIR, f"ir_{frame_idx:05d}.png") if ir_image is not None else None
-                                depth_path = os.path.join(RUN_DIR, f"depth_{frame_idx:05d}.png") if depth_map is not None else None
-                                row_data = [time.time(), s_us, t_us,
-                                            pwm_to_norm(s_us), pwm_to_norm(t_us),
-                                            depth_front, rgb_path, ir_path, depth_path]
-                                if not write_queue.full():
-                                    write_queue.put(("FRAME_ALL", rgb, ir_image, depth_map, row_data, rgb_path, ir_path, depth_path))
-                                    frame_idx += 1
-                                    if frame_idx % 2 == 0:
-                                        print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
-                                              f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
+                                frame_idx += 1
                                 last_save_time = now
-                        else:
-                            rgb, depth_front = get_rgb_and_front_depth()
-                            if rgb is not None:
-                                last_steer_rec = s_us
-                                last_throttle_rec = t_us
-                                rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
-                                row_data = [time.time(), s_us, t_us,
-                                            pwm_to_norm(s_us), pwm_to_norm(t_us),
-                                            depth_front, rgb_path]
-                                if not write_queue.full():
-                                    write_queue.put(("FRAME", rgb, row_data, rgb_path))
-                                    frame_idx += 1
-                                    if frame_idx % 2 == 0:
-                                        print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
-                                              f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
-                                last_save_time = now
+                                if frame_idx % 2 == 0:
+                                    print(f"\rQ:{write_queue.qsize()} | Frame {frame_idx:05d} | S {pwm_to_norm(s_us):+0.3f} | "
+                                          f"T {pwm_to_norm(t_us):+0.3f} | D {depth_front:.2f}", end="")
             
             # Small sleep to prevent CPU hogging in this thread
             time.sleep(0.005)
@@ -489,6 +959,25 @@ print("  ENTER -> Start/Pause recording")
 print(f"  BACKSPACE -> Delete last {cfg.DELETE_N_FRAMES} frames")
 print("  DEL/d -> Delete current session")
 print("  Ctrl+C -> Quit")
+print(f"  Save Rate -> {cfg.TARGET_FPS} FPS")
+if PRIMARY_RGB_IS_CAM0:
+    print(
+        f"  Primary RGB -> CAM0 (sensor-id={args.view_360_cam0_sensor_id}, "
+        f"save={DEFAULT_OUTPUT_SIZE[0]}x{DEFAULT_OUTPUT_SIZE[1]}, profile={PREPROCESS_PROFILE})"
+    )
+elif args.primary_rgb_source == "main_camera":
+    print("  Primary RGB -> Main camera (RealSense if available)")
+if cam_rig is not None and cam_rig.cam1_ok:
+    print(
+        f"  Rear Preview -> ENABLED (CAM0 sensor-id={args.view_360_cam0_sensor_id}, "
+        f"CAM1 sensor-id={args.view_360_cam1_sensor_id}, "
+        f"save={args.view_360_save_width}x{args.view_360_save_height}, "
+        f"flip={args.view_360_cam0_flip_method}/{args.view_360_cam1_flip_method})"
+    )
+elif args.view_360 and cam_rig is not None and cam_rig.cam0_ok:
+    print("  Rear Preview -> CAM0 available, CAM1 unavailable; continuing without rear sidecar")
+elif args.view_360:
+    print("  Rear Preview -> REQUESTED but unavailable, continuing without CAM0/CAM1 recording")
 print("\n>>> RECORDING will start after pressing ENTER\n")
 
 # ================= UTIL: deadzone =================
@@ -589,14 +1078,16 @@ except KeyboardInterrupt:
     print("\nStopping...")
 
 finally:
-    # Wait for queue to drain?
     print("\nDraining write queue...")
-    write_queue.put(None) # Signal exit
+    write_queue.put(None)
     write_queue.join()
-    
+
+    csv_file.close()
     neutralize()
     if not USE_NETWORK_CONTROLLER:
         pygame.quit()
+    if cam_rig is not None:
+        cam_rig.stop()
     if CAMERA_ENABLED:
         try:
             realsense_full.stop_pipeline()

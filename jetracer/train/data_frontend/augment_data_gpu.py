@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
-"""
-GPU-accelerated augmentation script using PyTorch + Kornia.
-
-- Reads flattened RGB images from a CSV (same layout as original script; image columns start at index 6).
-- Applies augmentations in batches on GPU when available.
-- Batch size is calculated from a VRAM fraction parameter.
-- Saves augmented dataset CSV and 3 sample combination PNGs.
-
-Requires:
-    torch, kornia, pandas, numpy, opencv-python, tqdm
-
-"""
+"""GPU-accelerated augmentation script using PyTorch + Kornia."""
 
 import os
 import math
 import random
+import re
 from typing import Tuple
 
 import pandas as pd
@@ -38,6 +28,7 @@ os.makedirs(TEST_OUTPUT_DIR, exist_ok=True)
 IMG_W = 160
 IMG_H = 120
 PIXELS = IMG_W * IMG_H
+PIXEL_PATTERN = re.compile(r"^[RGB](\d+)$")
 
 # Set how much of free GPU memory (fraction between 0 and 1) this script may use.
 # If CUDA not available, this is ignored.
@@ -334,17 +325,23 @@ if set(cols_to_corr).issubset(df.columns):
 else:
     print("Warning: some correlation columns not present in CSV; skipping correlation print.")
 
-# Determine image columns: assume same layout as your script: pixel columns start at index 6
-IMG_START_IDX = 6
-img_col_names = df.columns[IMG_START_IDX:].tolist()
-num_pixels_in_csv = len(img_col_names)
+# Determine image columns by name so metadata tails are preserved unchanged
+pixel_columns = []
+for column in df.columns:
+    if PIXEL_PATTERN.match(str(column)):
+        pixel_columns.append(column)
+pixel_columns.sort(key=lambda column: (
+    int(PIXEL_PATTERN.match(str(column)).group(1)),
+    0 if str(column).startswith("R") else 1 if str(column).startswith("G") else 2,
+))
+num_pixels_in_csv = len(pixel_columns)
 expected_pixels = IMG_W * IMG_H * 3
 if num_pixels_in_csv != expected_pixels:
     print(f"Warning: expected {expected_pixels} flattened pixels but CSV has {num_pixels_in_csv}. Proceeding with min length.")
     # We'll handle by truncating/padding if needed.
 
 # Convert flattened images to numpy array for faster slicing
-flat_images = df.iloc[:, IMG_START_IDX:].to_numpy(dtype=np.uint8)  # shape [N, num_pixels]
+flat_images = df.loc[:, pixel_columns].to_numpy(dtype=np.uint8)  # shape [N, num_pixels]
 N = flat_images.shape[0]
 print(f"Found {N} rows, flattened image columns: {flat_images.shape[1]}")
 
@@ -395,7 +392,7 @@ while idx < N:
         for k, ii in enumerate(sel_idx):
             new_row = base_rows.iloc[ii].copy()
             img_uint8 = (auged[k].detach().cpu().numpy().transpose(1,2,0) * 255.0).astype(np.uint8).reshape(-1)
-            new_row.iloc[IMG_START_IDX:IMG_START_IDX+expected_pixels] = img_uint8
+            new_row.loc[pixel_columns] = img_uint8[:len(pixel_columns)]
             rows_out.append(new_row)
 
     # 25% BLUR/SHARPEN
@@ -408,7 +405,7 @@ while idx < N:
         for k, ii in enumerate(sel_idx):
             new_row = base_rows.iloc[ii].copy()
             img_uint8 = (auged[k].detach().cpu().numpy().transpose(1,2,0) * 255.0).astype(np.uint8).reshape(-1)
-            new_row.iloc[IMG_START_IDX:IMG_START_IDX+expected_pixels] = img_uint8
+            new_row.loc[pixel_columns] = img_uint8[:len(pixel_columns)]
             rows_out.append(new_row)
 
     # 25% NOISE
@@ -421,7 +418,7 @@ while idx < N:
         for k, ii in enumerate(sel_idx):
             new_row = base_rows.iloc[ii].copy()
             img_uint8 = (auged[k].detach().cpu().numpy().transpose(1,2,0) * 255.0).astype(np.uint8).reshape(-1)
-            new_row.iloc[IMG_START_IDX:IMG_START_IDX+expected_pixels] = img_uint8
+            new_row.loc[pixel_columns] = img_uint8[:len(pixel_columns)]
             rows_out.append(new_row)
 
     # 50% FLIP
@@ -434,7 +431,7 @@ while idx < N:
             new_row = base_rows.iloc[ii].copy()
             new_row["steer_norm"] = -float(new_row["steer_norm"])
             img_uint8 = (flipped_imgs[k].detach().cpu().numpy().transpose(1,2,0) * 255.0).astype(np.uint8).reshape(-1)
-            new_row.iloc[IMG_START_IDX:IMG_START_IDX+expected_pixels] = img_uint8
+            new_row.loc[pixel_columns] = img_uint8[:len(pixel_columns)]
             rows_out.append(new_row)
 
     # FULL COMBINATION x4 (per original code)
@@ -448,7 +445,7 @@ while idx < N:
             new_row["steer_norm"] = float(s2_arr[i_local])
             new_row["depth_front"] = float(d2_arr[i_local])
             img_uint8 = (cimgs_t[i_local].detach().cpu().numpy().transpose(1,2,0) * 255.0).astype(np.uint8).reshape(-1)
-            new_row.iloc[IMG_START_IDX:IMG_START_IDX+expected_pixels] = img_uint8
+            new_row.loc[pixel_columns] = img_uint8[:len(pixel_columns)]
             rows_out.append(new_row)
         # Save up to 3 sample PNGs
         for sample_img in samples_local:

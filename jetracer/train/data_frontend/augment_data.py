@@ -1,9 +1,10 @@
-# Augmentation script that performs augmentations on the images in the dataset using the CPU.
-import pandas as pd
-import numpy as np
-import cv2
-import random
 import os
+import random
+import re
+
+import cv2
+import numpy as np
+import pandas as pd
 
 INPUT_CSV = "combined_dataset.csv"
 OUTPUT_CSV = "combined_augmented_dataset.csv"
@@ -13,14 +14,23 @@ os.makedirs(TEST_OUTPUT_DIR, exist_ok=True)
 IMG_W = 160
 IMG_H = 120
 PIXELS = IMG_W * IMG_H
+PIXEL_PATTERN = re.compile(r"^[RGB](\d+)$")
 
 
-# -----------------------------------------------------------
-# Utility Functions
-# -----------------------------------------------------------
+def get_pixel_columns(df):
+    pixel_columns = []
+    for column in df.columns:
+        if PIXEL_PATTERN.match(str(column)):
+            pixel_columns.append(column)
+    pixel_columns.sort(key=lambda column: (
+        int(PIXEL_PATTERN.match(str(column)).group(1)),
+        0 if str(column).startswith("R") else 1 if str(column).startswith("G") else 2,
+    ))
+    return pixel_columns
 
-def flat_to_image(row):
-    rgb = row.values.astype(np.uint8)
+
+def flat_to_image(pixel_values):
+    rgb = np.asarray(pixel_values, dtype=np.uint8)
     return rgb.reshape((IMG_H, IMG_W, 3))
 
 
@@ -40,11 +50,8 @@ def augment_color(img):
 def augment_blur_or_sharpen(img):
     if random.random() < 0.5:
         return cv2.GaussianBlur(img, (5, 5), 1.2)
-    else:
-        kernel = np.array([[0, -1, 0],
-                           [-1, 5, -1],
-                           [0, -1, 0]])
-        return cv2.filter2D(img, -1, kernel)
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    return cv2.filter2D(img, -1, kernel)
 
 
 def augment_noise(img):
@@ -60,8 +67,7 @@ def augment_noise(img):
 
 
 def augment_flip(img, steer_norm):
-    flipped = cv2.flip(img, 1)
-    return flipped, -steer_norm
+    return cv2.flip(img, 1), -steer_norm
 
 
 def augment_random_shadow(img):
@@ -88,24 +94,19 @@ def depth_noise(depth):
     return depth + random.uniform(-5.0, 5.0)
 
 
-# -----------------------------------------------------------
-# NEW AUGMENTATIONS FOR COMBINATION MODE
-# -----------------------------------------------------------
-
 def augment_motion_blur(img):
     k = random.choice([3, 5, 7, 9])
     kernel = np.zeros((k, k))
     if random.random() < 0.5:
-        kernel[int((k-1)/2), :] = np.ones(k)
+        kernel[int((k - 1) / 2), :] = np.ones(k)
     else:
-        kernel[:, int((k-1)/2)] = np.ones(k)
+        kernel[:, int((k - 1) / 2)] = np.ones(k)
     kernel /= k
     return cv2.filter2D(img, -1, kernel)
 
 
 def augment_steering_jitter(steer_norm):
-    jitter = random.uniform(-0.03, 0.03)
-    return steer_norm + jitter
+    return steer_norm + random.uniform(-0.03, 0.03)
 
 
 def augment_random_occlusion(img):
@@ -119,13 +120,9 @@ def augment_random_occlusion(img):
     y = random.randint(0, IMG_H - h)
     occluded = img.copy()
     color = random.randint(0, 50)
-    occluded[y:y+h, x:x+w] = (color, color, color)
+    occluded[y:y + h, x:x + w] = (color, color, color)
     return occluded
 
-
-# -----------------------------------------------------------
-# FULL COMBINATION AUGMENTATION
-# -----------------------------------------------------------
 
 def full_combination(img, steer_norm, depth_val):
     img = augment_color(img)
@@ -141,117 +138,106 @@ def full_combination(img, steer_norm, depth_val):
     return img, steer_norm, depth_val
 
 
-# -----------------------------------------------------------
-# CLEAN DEPTH FIELD
-# -----------------------------------------------------------
-
 def fix_depth_value(d):
-    """Convert depth_front to centimeters consistently."""
     if pd.isna(d):
         return d
-
-    # Already correct (50–2000 cm usual range)
     if d > 50:
         return d
-
-    # Meter-range values (1–10m → 100–1000 cm)
     if 1.0 < d < 10.0:
         return d * 100.0
-
-    # cm/1000 values from RealSense (0.05–2.0 → 50–2000 cm)
     if 0.05 < d < 2.0:
         return d * 1000.0
-
     return d
 
 
-# -----------------------------------------------------------
-# MAIN SCRIPT
-# -----------------------------------------------------------
+def main():
+    df = pd.read_csv(INPUT_CSV)
+    pixel_columns = get_pixel_columns(df)
+    if not pixel_columns:
+        raise RuntimeError("No pixel columns found in input CSV.")
 
-df = pd.read_csv(INPUT_CSV)
+    if "depth_front" in df.columns:
+        df["depth_front"] = df["depth_front"].apply(fix_depth_value)
 
-# Fix depth before augmentation
-df["depth_front"] = df["depth_front"].apply(fix_depth_value)
+    print("=== DEPTH CLEANUP COMPLETE ===")
+    if "depth_front" in df.columns:
+        print(df["depth_front"].describe())
 
-print("=== DEPTH CLEANUP COMPLETE ===")
-print(df["depth_front"].describe())
+    cols_to_corr = ["depth_front", "steer_us", "throttle_us", "steer_norm", "throttle_norm"]
+    if set(cols_to_corr).issubset(df.columns):
+        print("\n=== CORRELATION WITH DEPTH ===")
+        print(df[cols_to_corr].corr())
 
-# -----------------------------------------------------------
-# CORRELATION REPORT
-# -----------------------------------------------------------
+    rows = []
+    combo_png_saved = 0
 
-cols_to_corr = ["depth_front", "steer_us", "throttle_us", "steer_norm", "throttle_norm"]
-print("\n=== CORRELATION WITH DEPTH ===")
-print(df[cols_to_corr].corr())
+    for _, row in df.iterrows():
+        base_row = row.copy()
+        steer_norm = row["steer_norm"]
+        depth_val = row["depth_front"] if "depth_front" in row else 0.0
+        img = flat_to_image(row[pixel_columns].values)
 
+        rows.append(base_row)
 
-# -----------------------------------------------------------
-# AUGMENTATION LOOP
-# -----------------------------------------------------------
+        if random.random() < 0.25:
+            new = base_row.copy()
+            new.loc[pixel_columns] = image_to_flat(augment_color(img))
+            rows.append(new)
 
-rows = []
-combo_png_saved = 0
+        if random.random() < 0.25:
+            new = base_row.copy()
+            new.loc[pixel_columns] = image_to_flat(augment_blur_or_sharpen(img))
+            rows.append(new)
 
-for idx, row in df.iterrows():
-    base_row = row.copy()
-    steer_norm = row["steer_norm"]
-    depth_val = row["depth_front"]
+        if random.random() < 0.25:
+            new = base_row.copy()
+            new.loc[pixel_columns] = image_to_flat(augment_noise(img))
+            rows.append(new)
 
-    img = flat_to_image(row.iloc[6:])
+        if random.random() < 0.25:
+            new = base_row.copy()
+            new.loc[pixel_columns] = image_to_flat(augment_random_shadow(img))
+            rows.append(new)
 
-    # Keep original
-    rows.append(base_row)
+        if random.random() < 0.25:
+            new = base_row.copy()
+            new.loc[pixel_columns] = image_to_flat(augment_color_temperature(img))
+            rows.append(new)
 
-    # 25% COLOR
-    if random.random() < 0.25:
-        cimg = augment_color(img)
-        new = base_row.copy()
-        new.iloc[6:] = image_to_flat(cimg)
-        rows.append(new)
+        if random.random() < 0.25:
+            new = base_row.copy()
+            new.loc[pixel_columns] = image_to_flat(augment_motion_blur(img))
+            rows.append(new)
 
-    # 25% BLUR / SHARPEN
-    if random.random() < 0.25:
-        bimg = augment_blur_or_sharpen(img)
-        new = base_row.copy()
-        new.iloc[6:] = image_to_flat(bimg)
-        rows.append(new)
+        if random.random() < 0.25:
+            new = base_row.copy()
+            new.loc[pixel_columns] = image_to_flat(augment_random_occlusion(img))
+            rows.append(new)
 
-    # 25% NOISE
-    if random.random() < 0.25:
-        nimg = augment_noise(img)
-        new = base_row.copy()
-        new.iloc[6:] = image_to_flat(nimg)
-        rows.append(new)
+        if random.random() < 0.50:
+            fimg, fsteer = augment_flip(img, steer_norm)
+            new = base_row.copy()
+            new.loc[pixel_columns] = image_to_flat(fimg)
+            new["steer_norm"] = fsteer
+            rows.append(new)
 
-    # 50% FLIP
-    if random.random() < 0.50:
-        fimg, s = augment_flip(img, steer_norm)
-        new = base_row.copy()
-        new["steer_norm"] = s
-        new.iloc[6:] = image_to_flat(fimg)
-        rows.append(new)
-
-    # FULL COMBINATION × 4
-    for _ in range(4):
-        cimg, s2, d2 = full_combination(img.copy(), steer_norm, depth_val)
-        new = base_row.copy()
-        new["steer_norm"] = s2
-        new["depth_front"] = d2
-        new.iloc[6:] = image_to_flat(cimg)
-        rows.append(new)
+        for _ in range(4):
+            fimg, fsteer, fdepth = full_combination(img, steer_norm, depth_val)
+            new = base_row.copy()
+            new.loc[pixel_columns] = image_to_flat(fimg)
+            new["steer_norm"] = fsteer
+            new["depth_front"] = fdepth
+            rows.append(new)
 
         if combo_png_saved < 3:
-            png_path = os.path.join(TEST_OUTPUT_DIR, f"combo_sample_{combo_png_saved+1}.png")
-            cv2.imwrite(png_path, cv2.cvtColor(cimg, cv2.COLOR_RGB2BGR))
+            combo_path = os.path.join(TEST_OUTPUT_DIR, f"combo_{combo_png_saved:02d}.png")
+            cv2.imwrite(combo_path, cv2.cvtColor(full_combination(img, steer_norm, depth_val)[0], cv2.COLOR_RGB2BGR))
             combo_png_saved += 1
 
+    df_out = pd.DataFrame(rows, columns=df.columns)
+    df_out.to_csv(OUTPUT_CSV, index=False)
+    print(f"Augmented dataset saved to {OUTPUT_CSV}")
 
-# SAVE OUTPUT
-out_df = pd.DataFrame(rows, columns=df.columns)
-out_df.to_csv(OUTPUT_CSV, index=False)
 
-print("\nAugmentation complete!")
-print(f"Original rows: {len(df)}")
-print(f"Augmented rows: {len(out_df)}")
-print("Saved 3 combination PNG samples to:", TEST_OUTPUT_DIR)
+if __name__ == "__main__":
+    main()

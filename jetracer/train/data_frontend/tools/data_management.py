@@ -8,6 +8,14 @@ from pathlib import Path
 import csv
 import zipfile
 import shutil
+import sys
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FRONTEND_DIR = os.path.dirname(CURRENT_DIR)
+if DATA_FRONTEND_DIR not in sys.path:
+    sys.path.append(DATA_FRONTEND_DIR)
+
+from dataset_csv_creator import create_combined_csv as build_combined_csv
 
 # Session state with unique prefix to avoid conflicts
 if "dm_idx" not in st.session_state:
@@ -54,105 +62,24 @@ def resolve_image_path(root_folder: str, raw_path: str) -> str:
 # ────────────────────────────────
 # Create combined pixel-flattened CSV
 # ────────────────────────────────
-def create_combined_csv(root_dir: str):
+def create_combined_csv(root_dir: str, rgb_source_filter=None, allow_mixed=False):
     output_csv = os.path.join(root_dir, "combined_dataset.csv")
-
     if os.path.exists(output_csv):
         st.warning("Overwriting existing combined_dataset.csv...")
 
-    with st.spinner("Scanning runs and finding sample image..."):
-        subdirs = [d for d in os.listdir(root_dir)
-                   if os.path.isdir(os.path.join(root_dir, d)) and d.startswith('run_')]
-        if not subdirs:
-            st.error("No run_* folders found.")
+    with st.spinner("Combining run CSVs with metadata-aware pixel flattening..."):
+        try:
+            build_combined_csv(
+                root_dir=root_dir,
+                output_csv=output_csv,
+                allow_mixed=allow_mixed,
+                rgb_source_filter=rgb_source_filter,
+            )
+        except Exception as exc:
+            st.error(str(exc))
             return
 
-        # Find one valid image to get image size
-        sample_image_path = None
-        for run_dir in subdirs:
-            run_path = os.path.join(root_dir, run_dir)
-            csv_path = os.path.join(run_path, "dataset.csv")
-            if not os.path.exists(csv_path):
-                continue
-            df_temp = pd.read_csv(csv_path)
-            img_col = next((c for c in df_temp.columns if any(x in c.lower() for x in ["rgb", "image", "path"])), None)
-            if not img_col:
-                continue
-            for val in df_temp[img_col]:
-                if pd.notna(val):
-                    full_path = resolve_image_path(run_path, val)
-                    if os.path.exists(full_path):
-                        sample_image_path = full_path
-                        break
-            if sample_image_path:
-                break
-
-        if not sample_image_path:
-            st.error("Could not find any valid image in the runs.")
-            return
-
-        img = Image.open(sample_image_path).convert('RGB')
-        width, height = img.size
-        num_pixels = width * height
-
-    # Header
-    header = ['timestamp', 'steer_us', 'throttle_us', 'steer_norm', 'throttle_norm', 'depth_front']
-    for i in range(1, num_pixels + 1):
-        header.extend([f'R{i}', f'G{i}', f'B{i}'])
-
-    all_rows = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    for i, run_dir in enumerate(subdirs):
-        status_text.text(f"Processing {run_dir} ({i+1}/{len(subdirs)})")
-        run_path = os.path.join(root_dir, run_dir)
-        csv_path = os.path.join(run_path, "dataset.csv")
-        if not os.path.exists(csv_path):
-            continue
-
-        df = pd.read_csv(csv_path)
-        df.columns = [c.strip() for c in df.columns]
-        img_col = next((c for c in df.columns if any(x in c.lower() for x in ["rgb", "image", "path"])), None)
-        if not img_col:
-            continue
-
-        for _, row in df.iterrows():
-            rgb_path = row.get(img_col)
-            if pd.isna(rgb_path):
-                continue
-            full_img = resolve_image_path(run_path, rgb_path)
-            if not os.path.exists(full_img):
-                continue
-            try:
-                img = Image.open(full_img).convert('RGB')
-                if img.size != (width, height):
-                    continue
-                pixels = [str(v) for pixel in img.getdata() for v in pixel]
-                data_row = [
-                    str(row.get("timestamp", "")),
-                    str(row.get("steer_us", "")),
-                    str(row.get("throttle_us", "")),
-                    str(row.get("steer_norm", 0)),
-                    str(row.get("throttle_norm", 0)),
-                    str(row.get("depth_front", ""))
-                ] + pixels
-                all_rows.append(data_row)
-            except Exception as e:
-                st.warning(f"Error reading {full_img}: {e}")
-
-        progress_bar.progress((i + 1) / len(subdirs))
-
-    # Write final CSV
-    status_text.text("Writing combined_dataset.csv...")
-    with open(output_csv, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(all_rows)
-
-    progress_bar.empty()
-    status_text.empty()
-    st.success(f"Combined dataset created!\n→ `{output_csv}`\nFrames: {len(all_rows)}")
+    st.success(f"Combined dataset created!\n→ `{output_csv}`")
 
 
 # ────────────────────────────────
@@ -270,9 +197,24 @@ def show():
         st.info("Please select a valid folder.")
         st.stop()
 
+    col_filter, col_allow = st.columns(2)
+    with col_filter:
+        rgb_source_filter = st.selectbox(
+            "RGB source filter",
+            options=["(all)", "cam0", "realsense", "opencv"],
+            index=0,
+            key="dm_rgb_source_filter",
+        )
+    with col_allow:
+        allow_mixed = st.checkbox("Allow mixed source/profile", value=False, key="dm_allow_mixed")
+
     # Button to create combined CSV
     if st.button("Create combined_dataset.csv (pixel-flattened)", type="primary", use_container_width=True):
-        create_combined_csv(root_folder)
+        create_combined_csv(
+            root_folder,
+            rgb_source_filter=None if rgb_source_filter == "(all)" else rgb_source_filter,
+            allow_mixed=allow_mixed,
+        )
 
     st.markdown("---")
 
