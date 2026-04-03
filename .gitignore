@@ -12,3 +12,5 @@ jetracer/train/runs_rgb_depth/
 # Local virtual environments
 .venv/
 venv/
+
+docs/
