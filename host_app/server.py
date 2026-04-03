@@ -240,7 +240,7 @@ async def websocket_endpoint(websocket: WebSocket, client_name: str):
 
 # ── Video proxy WebSocket ────────────────────────────────────────────────────
 @app.websocket("/ws/video/{car_id}")
-async def video_proxy_endpoint(websocket: WebSocket, car_id: str):
+async def video_proxy_endpoint(websocket: WebSocket, car_id: str, camera_index: int = None, fps: int = 5):
     """
     Browser connects here; we open an outbound WS to the car's /ws/video
     endpoint, authenticate, and relay encrypted JPEG frames to the browser
@@ -265,7 +265,10 @@ async def video_proxy_endpoint(websocket: WebSocket, car_id: str):
     try:
         async with _ws_client.connect(car_ws_uri) as car_ws:
             # Send auth to the car
-            await car_ws.send(json.dumps({"auth": password}))
+            auth_msg = {"auth": password, "fps": fps}
+            if camera_index is not None:
+                auth_msg["camera_index"] = camera_index
+            await car_ws.send(json.dumps(auth_msg))
             ack_raw = await asyncio.wait_for(car_ws.recv(), timeout=10.0)
             ack = json.loads(ack_raw)
             if ack.get("status") != "ok":
@@ -293,12 +296,9 @@ async def video_proxy_endpoint(websocket: WebSocket, car_id: str):
             pass
 
 # --- Hybrid Proxy Helpers ---
-async def send_car_command(car_id: str, command: str, payload: dict = None):
+async def send_car_command(car_id: str, command: str, payload: dict = {}):
     if car_id not in db.cars: raise HTTPException(404, "Car not found")
     car = db.cars[car_id]
-    payload = dict(payload or {})
-    if command == "configure" and "password" not in payload:
-        payload["password"] = car.get("password", "changeme")
 
     if car.get("type") == "virtual":
         return {"status": "sent_via_virtual"}
@@ -326,188 +326,8 @@ async def send_car_command(car_id: str, command: str, payload: dict = None):
 # --- Endpoints ---
 
 def _safe_car(record: dict) -> dict:
-    """Return a JSON-serialisable copy of a car record with secrets redacted."""
-    return _redact_sensitive(record)
-
-
-def _redact_sensitive(value):
-    if isinstance(value, dict):
-        redacted = {}
-        for key, item in value.items():
-            if key in ("fernet", "password"):
-                continue
-            redacted[key] = _redact_sensitive(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_sensitive(item) for item in value]
-    return value
-
-
-def _test_client_role_cameras():
-    return [
-        {
-            "role": "primary_rgb",
-            "type": "csi",
-            "sensor_id": 0,
-            "width": 640,
-            "height": 480,
-            "fps": 15,
-            "flip_method": 2,
-            "enabled": True,
-        },
-        {
-            "role": "sidecar_depth_imu",
-            "type": "realsense",
-            "width": 640,
-            "height": 480,
-            "fps": 15,
-            "enabled": True,
-        },
-        {
-            "role": "rear_preview",
-            "type": "csi",
-            "sensor_id": 1,
-            "width": 640,
-            "height": 480,
-            "fps": 15,
-            "flip_method": 2,
-            "enabled": False,
-        },
-    ]
-
-
-def _test_client_sensor_state():
-    return {
-        "forward_preview_role": "primary_rgb",
-        "depth_aligned_to_primary": False,
-        "primary_rgb": {
-            "role": "primary_rgb",
-            "type": "csi",
-            "label": "CAM0 Primary RGB",
-            "configured": True,
-            "enabled": True,
-            "present": True,
-            "healthy": True,
-            "status": "available",
-            "frame_available": True,
-            "depth_available": False,
-            "imu_available": False,
-            "source": "cam0",
-            "used_for": ["lane_following", "apriltag", "forward_preview"],
-            "sensor_id": 0,
-            "flip_method": 2,
-            "width": 640,
-            "height": 480,
-            "fps": 15,
-            "frame_age_ms": 28,
-            "error": None,
-        },
-        "sidecar_depth_imu": {
-            "role": "sidecar_depth_imu",
-            "type": "realsense",
-            "label": "RealSense Sidecar Depth/IMU",
-            "configured": True,
-            "enabled": True,
-            "present": True,
-            "healthy": True,
-            "status": "available",
-            "frame_available": False,
-            "depth_available": True,
-            "imu_available": True,
-            "source": "realsense",
-            "used_for": ["obstacle_stop", "state_context"],
-            "depth_status": "available",
-            "imu_status": "available",
-            "depth_frame_age_ms": 41,
-            "imu_frame_age_ms": 19,
-            "imu_data": {
-                "accel": [0.01, -0.02, 0.98],
-                "gyro": [0.001, 0.002, 0.003],
-            },
-            "width": 640,
-            "height": 480,
-            "fps": 15,
-            "frame_age_ms": 32,
-            "error": None,
-        },
-        "depth": {
-            "role": "depth",
-            "type": "realsense",
-            "label": "Depth Sidecar",
-            "configured": True,
-            "enabled": True,
-            "present": True,
-            "healthy": True,
-            "status": "available",
-            "frame_available": True,
-            "depth_available": True,
-            "imu_available": False,
-            "source": "realsense",
-            "frame_age_ms": 41,
-            "used_for": ["obstacle_stop"],
-            "depth_status": "available",
-            "imu_status": "disabled",
-            "error": None,
-        },
-        "imu": {
-            "role": "imu",
-            "type": "realsense",
-            "label": "IMU Sidecar",
-            "configured": True,
-            "enabled": True,
-            "present": True,
-            "healthy": True,
-            "status": "available",
-            "frame_available": True,
-            "depth_available": False,
-            "imu_available": True,
-            "source": "realsense",
-            "frame_age_ms": 19,
-            "used_for": ["state_context"],
-            "depth_status": "disabled",
-            "imu_status": "available",
-            "error": None,
-        },
-        "rear_preview": {
-            "role": "rear_preview",
-            "type": "csi",
-            "label": "CAM1 Rear Preview",
-            "configured": True,
-            "enabled": False,
-            "present": False,
-            "healthy": False,
-            "status": "disabled",
-            "frame_available": False,
-            "depth_available": False,
-            "imu_available": False,
-            "source": "cam1",
-            "used_for": ["rear_preview_only"],
-            "sensor_id": 1,
-            "flip_method": 2,
-            "width": 640,
-            "height": 480,
-            "fps": 15,
-            "frame_age_ms": None,
-            "error": None,
-        },
-        "rear": {
-            "role": "rear",
-            "type": "csi",
-            "label": "CAM1 Rear Preview",
-            "configured": True,
-            "enabled": False,
-            "healthy": False,
-            "present": False,
-            "status": "disabled",
-            "frame_available": False,
-            "depth_available": False,
-            "imu_available": False,
-            "source": "cam1",
-            "used_for": ["rear_preview_only"],
-            "frame_age_ms": None,
-            "error": None,
-        },
-    }
+    """Return a JSON-serialisable copy of a car record (strip non-serialisable fields)."""
+    return {k: v for k, v in record.items() if k != "fernet"}
 
 @app.get("/api/cars")
 def get_cars():
@@ -518,34 +338,6 @@ def get_cars():
 def add_test_client():
     """Adds a simulated client for UI testing."""
     client_id = f"test-client-{uuid.uuid4().hex[:8]}"
-    mission_snapshot = {
-        "enabled": True,
-        "route_name": "expo_route",
-        "state": "RUNNING",
-        "stop_reason": None,
-        "tag_detector_status": "available",
-        "control_model_status": "available",
-        "depth_status": "available",
-        "obstacle_distance_m": 1.25,
-        "start_tag_seen": True,
-        "checkpoint_seen": True,
-        "goal_seen": False,
-        "expected_next_tag": 30,
-        "last_tag_id": 20,
-        "last_tag_seen_ts": time.time() - 5.0,
-        "last_checkpoint_seen_ts": time.time() - 5.0,
-        "last_goal_seen_ts": None,
-        "goal_approach_since": None,
-        "state_changed_at": time.time() - 15.0,
-        "tag_cooldown_s": 1.25,
-        "tag_detect_every_n_frames": 3,
-        "depth_stop": {
-            "enabled": True,
-            "threshold_m": 0.6,
-            "roi": {"x": 0.35, "y": 0.35, "w": 0.30, "h": 0.30},
-        },
-        "tag_ids": {"start_home": 10, "checkpoint": 20, "goal": 30},
-    }
     db.cars[client_id] = {
         "id": client_id,
         "name": f"Test Racer {random.randint(1, 99)}",
@@ -556,39 +348,15 @@ def add_test_client():
         "details": {
             "running": True,
             "paused": False,
-            "config": {
-                "device": "cuda",
-                "architecture": "resnet101",
-                "cameras": _test_client_role_cameras(),
-                "control_model_type": "tensorrt",
-                "control_model": "checkpoints/best_model_trt.pth",
-                "detection_model": "yolov8n.pt",
-                "throttle_mode": "fixed",
-                "fixed_throttle_value": 0.22,
-                "action_loop": ["control", "detection", "api"],
-                "preprocess_profile": "cam0_fisheye_v1",
-                "mission": mission_snapshot,
-            },
             "state": {
                 "fps": 30,
-                "location": {
-                    "x": 0,
-                    "y": 0,
-                    "theta": 0,
-                    "imu": {
-                        "accel": [0.01, -0.02, 0.98],
-                        "gyro": [0.001, 0.002, 0.003],
-                    },
-                },
-                "mission": mission_snapshot,
-                "sensors": _test_client_sensor_state(),
+                "location": {"x": 0, "y": 0, "theta": 0},
                 "specs": {
                     "device": "NVIDIA Jetson Nano",
                     "cpu_ram": "4-core ARMv57 / 4GB LPDDR4",
                     "cameras": [
-                        {"role": "primary_rgb", "type": "csi", "width": 640, "height": 480, "fps": 15, "sensor_id": 0, "flip_method": 2},
-                        {"role": "sidecar_depth_imu", "type": "realsense", "width": 640, "height": 480, "fps": 15, "enabled": True},
-                        {"role": "rear_preview", "type": "csi", "width": 640, "height": 480, "fps": 15, "sensor_id": 1, "flip_method": 2, "enabled": False},
+                        {"type": "RealSense D435i", "width": 640, "height": 480, "fps": 30},
+                        {"type": "CSI Camera", "width": 1280, "height": 720, "fps": 60}
                     ],
                     "inference": "CUDA (GPU)",
                     "resnet_version": "ResNet-101",
@@ -655,7 +423,7 @@ def proxy_status(car_id: str):
     car = db.cars[car_id]
     
     if car.get("type") in ("virtual", "websocket"):
-        return _redact_sensitive(car.get("details", {}))
+        return car.get("details", {})
 
     url = f"http://{car['ip']}:{car['port']}/status"
     headers = {"X-Api-Key": car.get("password", "changeme")}
@@ -667,7 +435,7 @@ def proxy_status(car_id: str):
             is_running = data.get("running", False)
             car["status"] = "online" if is_running else "stopped"
             car["details"] = data
-            return _redact_sensitive(data)
+            return data
     except Exception as e:
         err_msg = str(e)
         print(f"Error reaching {url}: {err_msg}")
