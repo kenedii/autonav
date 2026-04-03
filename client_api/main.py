@@ -251,11 +251,21 @@ async def video_stream_endpoint(websocket: WebSocket):
 
         # --- Stream frames ---
         import cv2 as _cv2
+        import time
         cap = None
         try:
-            # Use camera index 0; if the car has a configured camera, prefer it
-            cam_cfg = (car.config.get("cameras") or [{}])
-            cam_index = cam_cfg[0].get("index", 0) if cam_cfg else 0
+            req_index = auth_data.get("camera_index")
+            if req_index is not None:
+                cam_index = int(req_index)
+            else:
+                cam_cfg = (car.config.get("cameras") or [{}])
+                cam_index = cam_cfg[0].get("index", 0) if cam_cfg else 0
+            
+            req_fps = int(auth_data.get("fps", 5))
+            if req_fps <= 0:
+                req_fps = 5
+            frame_delay = 1.0 / req_fps
+
             cap = _cv2.VideoCapture(cam_index)
             if not cap.isOpened():
                 await websocket.send_text(json.dumps({"error": "camera_unavailable"}))
@@ -263,6 +273,8 @@ async def video_stream_endpoint(websocket: WebSocket):
                 return
 
             while True:
+                loop_start = time.time()
+                
                 ret, frame = cap.read()
                 if not ret:
                     await asyncio.sleep(0.05)
@@ -279,7 +291,10 @@ async def video_stream_endpoint(websocket: WebSocket):
                     payload = jpeg_bytes
 
                 await websocket.send_bytes(payload)
-                await asyncio.sleep(1 / 15)  # ~15 FPS stream
+                
+                elapsed = time.time() - loop_start
+                sleep_time = max(0.01, frame_delay - elapsed)
+                await asyncio.sleep(sleep_time)
 
         except WebSocketDisconnect:
             pass

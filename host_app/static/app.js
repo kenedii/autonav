@@ -2,6 +2,15 @@
 let cars = [];
 let selectedCarId = null;
 let pollInterval = null;
+// Logs state
+let carLogs = {};              // car_id -> array of log entries
+let lastLogTs = {};           // car_id -> last timestamp fetched
+let logPollInterval = null;
+
+// ── Video stream state ──────────────────────────────────────────────────────
+let videoSocket = null;
+let videoCanvas = null;
+let videoCtx   = null;
 
 // --- Tab Logic ---
 function openTab(tabName) {
@@ -25,10 +34,24 @@ function openClientTab(tabName) {
         content.classList.add('active');
     }
     
-    // Find button to highlight
+    // Find button to highlight (overview, specs, video, logs)
     const btns = document.querySelectorAll('.client-tab-btn');
     if (tabName === 'overview') btns[0].classList.add('active');
-    if (tabName === 'specs') btns[1].classList.add('active');
+    if (tabName === 'specs')    btns[1].classList.add('active');
+    if (tabName === 'video')    btns[2].classList.add('active');
+    if (tabName === 'logs')     btns[3].classList.add('active');
+
+    // Start / stop video stream based on tab visibility
+    if (tabName !== 'video') {
+        stopVideoStream();
+    }
+
+    // Start / stop log polling
+    if (tabName === 'logs') {
+        startLogPolling();
+    } else {
+        stopLogPolling();
+    }
 }
 
 // --- Poll Data ---
@@ -91,6 +114,14 @@ function renderFleetList() {
 }
 
 function selectCar(id) {
+    // Prevent recursion/re-entry by checking if we're already selecting this car
+    if (selectedCarId === id) return;
+    
+    // 1. Clean up old state
+    stopVideoStream();
+    stopLogPolling();
+
+    // 2. Set new state
     selectedCarId = id;
     renderFleetList(); // update active state
     
@@ -101,6 +132,12 @@ function selectCar(id) {
     fetch(`/api/cars/${id}/status`); 
     
     updateDetailView();
+
+    // 3. Resume polling if tabs are active
+    const logsPane = document.getElementById('client-tab-logs');
+    if (logsPane && logsPane.classList.contains('active')) {
+        startLogPolling();
+    }
 }
 
 function updateDetailView() {
@@ -180,10 +217,39 @@ function updateDetailView() {
     
     // Format cameras nicely
     let camText = 'None';
+    const cameraSelect = document.getElementById('camera-select');
+    if (cameraSelect) {
+        cameraSelect.innerHTML = ''; // Clear existing options
+    }
+    
     if (specs.cameras && Array.isArray(specs.cameras)) {
         camText = specs.cameras.map(c => `${c.type} (${c.width}x${c.height})`).join(', ');
+        
+        // Populate the dropdown
+        if (cameraSelect) {
+            specs.cameras.forEach((c, idx) => {
+                const opt = document.createElement('option');
+                opt.value = c.index !== undefined ? c.index : idx;
+                opt.text = `Camera ${opt.value}: ${c.type} (${c.width}x${c.height})`;
+                cameraSelect.appendChild(opt);
+            });
+        }
     } else if (specs.cameras) {
         camText = specs.cameras;
+        // Fallback for string-based camera info
+        if (cameraSelect) {
+            const opt = document.createElement('option');
+            opt.value = "0";
+            opt.text = "Camera 0";
+            cameraSelect.appendChild(opt);
+        }
+    } else {
+        if (cameraSelect) {
+            const opt = document.createElement('option');
+            opt.value = "0";
+            opt.text = "Camera 0";
+            cameraSelect.appendChild(opt);
+        }
     }
     document.getElementById('spec-cameras').innerText = camText;
     
@@ -212,18 +278,19 @@ async function addTestClient() {
 
 // Deprecated: was for manual add
 async function addCar() {
-    const name = document.getElementById('new-name').value;
-    const ip = document.getElementById('new-ip').value;
-    const port = document.getElementById('new-port').value;
-    
+    const name     = document.getElementById('new-name').value;
+    const ip       = document.getElementById('new-ip').value;
+    const port     = document.getElementById('new-port').value;
+    const password = document.getElementById('new-password').value || 'changeme';
+
     if (!name || !ip) return alert("Fill all fields");
-    
+
     await fetch('/api/cars', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name, ip, port: parseInt(port)})
+        body: JSON.stringify({name, ip, port: parseInt(port), password})
     });
-    
+
     closeAddModal();
     fetchCars();
 }
@@ -535,11 +602,201 @@ function drawSlamMap(car) {
     mapCtx.restore();
 }
 
+// ── Logs fetching & rendering ───────────────────────────────────────────
+function _formatTs(ts) {
+    try {
+        const d = new Date(ts * 1000);
+        return d.toISOString().replace('T', ' ').replace('Z', '');
+    } catch (e) { return ts; }
+}
+
+async function fetchLogs() {
+    if (!selectedCarId) return;
+    try {
+        const since = lastLogTs[selectedCarId] || 0;
+        const encodedId = encodeURIComponent(selectedCarId);
+        const res = await fetch(`/api/cars/${encodedId}/logs?since=${since}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const entries = data.logs || [];
+        if (!carLogs[selectedCarId]) carLogs[selectedCarId] = [];
+        if (entries.length > 0) {
+            entries.forEach(e => carLogs[selectedCarId].push(e));
+            lastLogTs[selectedCarId] = entries[entries.length-1].timestamp || lastLogTs[selectedCarId] || Date.now()/1000;
+            renderLogs();
+        }
+    } catch (e) {
+        console.error('Failed to fetch logs', e);
+    }
+}
+
+function renderLogs() {
+    const out = document.getElementById('log-output');
+    const empty = document.getElementById('log-empty');
+    if (!out || !selectedCarId) return;
+    const all = carLogs[selectedCarId] || [];
+    if (all.length === 0) {
+        out.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+    }
+    empty.style.display = 'none';
+
+    const levelFilter = document.getElementById('log-level-filter')?.value || 'ALL';
+    const autoScroll = document.getElementById('log-autoscroll')?.checked;
+
+    // Map level order
+    const order = { 'DEBUG': 10, 'INFO': 20, 'WARN': 30, 'WARNING':30, 'ERROR': 40, 'CRITICAL':50 };
+    const minLevel = levelFilter === 'ALL' ? 0 : order[levelFilter] || 0;
+
+    // Build HTML
+    let html = '';
+    all.forEach(entry => {
+        const lvl = (entry.level || 'INFO').toUpperCase();
+        const lvlVal = order[lvl] || 20;
+        if (lvlVal < minLevel) return;
+        const ts = _formatTs(entry.timestamp || (Date.now()/1000));
+        const msg = entry.message || '';
+        html += `<div class="log-entry"><span class="log-ts">${ts}</span>` +
+                `<span class="log-level log-level-${lvl}">${lvl}</span>` +
+                `<span class="log-msg">${escapeHtml(msg)}</span></div>`;
+    });
+    out.innerHTML = html;
+    if (autoScroll) out.scrollTop = out.scrollHeight;
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function(c){
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c];
+    });
+}
+
+function saveLog() {
+    if (!selectedCarId) return alert('No car selected');
+    const entries = carLogs[selectedCarId] || [];
+    let text = entries.map(e => `${_formatTs(e.timestamp)} [${e.level}] ${e.message}`).join('\n');
+    const blob = new Blob([text], {type: 'text/plain'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${selectedCarId.replace(/[:\\/]/g,'_')}_log.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
+async function clearLogs() {
+    if (!selectedCarId) return;
+    if (!confirm('Clear logs for this client on the server?')) return;
+    const encodedId = encodeURIComponent(selectedCarId);
+    try {
+        const res = await fetch(`/api/cars/${encodedId}/logs`, { method: 'DELETE' });
+        if (res.ok) {
+            carLogs[selectedCarId] = [];
+            lastLogTs[selectedCarId] = 0;
+            renderLogs();
+        } else {
+            alert('Failed to clear logs');
+        }
+    } catch (e) { console.error(e); alert('Error clearing logs'); }
+}
+
+function startLogPolling() {
+    if (!selectedCarId) return;
+    if (logPollInterval) clearInterval(logPollInterval);
+    // initialize storage
+    if (!carLogs[selectedCarId]) carLogs[selectedCarId] = [];
+    if (!lastLogTs[selectedCarId]) lastLogTs[selectedCarId] = 0;
+    fetchLogs();
+    logPollInterval = setInterval(fetchLogs, 1500);
+}
+
+function stopLogPolling() {
+    if (logPollInterval) { clearInterval(logPollInterval); logPollInterval = null; }
+}
+
 async function cancelNavigation() {
     if (!selectedCarId) return;
     selectedDestination = null;
     await fetch(`/api/cars/${selectedCarId}/navigate/cancel`, {method: 'POST'});
 }
+
+// ── Live Video Stream ─────────────────────────────────────────────────────
+function startVideoStream() {
+    if (!selectedCarId) return;
+    stopVideoStream(); // close any existing stream first
+
+    videoCanvas = document.getElementById('video-canvas');
+    if (!videoCanvas) return;
+    videoCtx = videoCanvas.getContext('2d');
+
+    // Update status indicator
+    const status = document.getElementById('video-status');
+    if (status) status.innerText = 'Connecting…';
+
+    // The car_id in the URL must be URL-encoded because it contains ':'
+    const encodedId = encodeURIComponent(selectedCarId);
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    
+    let camIdx = "0";
+    const camSelect = document.getElementById('camera-select');
+    if (camSelect && camSelect.value) {
+        camIdx = camSelect.value;
+    }
+    
+    let fps = "5";
+    const fpsSelect = document.getElementById('fps-select');
+    if (fpsSelect && fpsSelect.value) {
+        fps = fpsSelect.value;
+    }
+    
+    const wsUrl = `${wsProto}://${location.host}/ws/video/${encodedId}?camera_index=${camIdx}&fps=${fps}`;
+
+    videoSocket = new WebSocket(wsUrl);
+    videoSocket.binaryType = 'arraybuffer';
+
+    videoSocket.onopen = () => {
+        if (status) status.innerText = 'Streaming ▶';
+    };
+
+    videoSocket.onmessage = (event) => {
+        if (!(event.data instanceof ArrayBuffer)) return;
+        // Decode JPEG bytes into an image and draw on canvas
+        const blob = new Blob([event.data], { type: 'image/jpeg' });
+        const url  = URL.createObjectURL(blob);
+        const img  = new Image();
+        img.onload = () => {
+            // Resize canvas to match the frame dimensions
+            if (videoCanvas.width  !== img.width)  videoCanvas.width  = img.width;
+            if (videoCanvas.height !== img.height) videoCanvas.height = img.height;
+            videoCtx.drawImage(img, 0, 0);
+            URL.revokeObjectURL(url);
+        };
+        img.src = url;
+    };
+
+    videoSocket.onerror = (e) => {
+        if (status) status.innerText = 'Error ✖';
+        console.error('[Video WS] error', e);
+    };
+
+    videoSocket.onclose = (e) => {
+        if (status) status.innerText = `Disconnected (${e.code})`;
+        videoSocket = null;
+    };
+}
+
+function stopVideoStream() {
+    if (videoSocket) {
+        videoSocket.close();
+        videoSocket = null;
+    }
+    const status = document.getElementById('video-status');
+    if (status) status.innerText = 'Stopped';
+}
+
+// Removed wrappedSelectCar definition to prevent recursion
 
 // Init
 window.onclick = function(event) {

@@ -74,6 +74,8 @@
                         <div class="client-tabs-nav">
                             <button class="client-tab-btn active" onclick="openClientTab('overview')">Overview</button>
                             <button class="client-tab-btn" onclick="openClientTab('specs')">Specs</button>
+                            <button class="client-tab-btn" onclick="openClientTab('video')">📷 Live Feed</button>
+                            <button class="client-tab-btn" onclick="openClientTab('logs')">📋 Logs</button>
                         </div>
 
                         <div id="client-tab-overview" class="client-tab-pane active">
@@ -148,6 +150,60 @@
                             <tr><td><strong>YOLO Version:</strong></td><td id="spec-yolo">Loading...</td></tr>
                         </table>
                     </div>
+
+                    <!-- Video Feed Tab -->
+                    <div id="client-tab-video" class="client-tab-pane" style="display:none; padding:1rem;">
+                        <h3>Live Camera Feed</h3>
+                        <p style="color:#d9534f; font-size:0.85em; margin-bottom:0.75rem; font-weight:bold;">
+                            Note: Accessing the video feed at high FPS may severely impact the performance of other tasks such as navigation and model inference.
+                        </p>
+                        <div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem;">
+                            <span id="video-status" style="color:#888; font-size:0.9em;">Stopped</span>
+                            <select id="camera-select" style="padding:4px; border-radius:4px; max-width: 150px;">
+                                <option value="0">Camera 0</option>
+                            </select>
+                            <label for="fps-select" style="font-size:0.9em; font-weight:bold;">FPS:</label>
+                            <select id="fps-select" style="padding:4px; border-radius:4px;">
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="5" selected>5</option>
+                                <option value="10">10</option>
+                                <option value="15">15</option>
+                            </select>
+                            <button class="btn-success" onclick="startVideoStream()">▶ Start</button>
+                            <button class="btn-danger-outline" onclick="stopVideoStream()">■ Stop</button>
+                        </div>
+                        <div style="background:#000; display:inline-block; border:1px solid #333; border-radius:6px; overflow:hidden;">
+                            <canvas id="video-canvas" width="640" height="480"
+                                    style="display:block; max-width:100%;"></canvas>
+                        </div>
+                        <p style="color:#666; font-size:0.8em; margin-top:0.5rem;">
+                            Stream is encrypted end-to-end with Fernet AES-128 (derived from the car password).
+                        </p>
+                    </div>
+
+                    <!-- Logs Tab -->
+                    <div id="client-tab-logs" class="client-tab-pane" style="display:none; padding:1rem;">
+                        <div class="log-panel-header">
+                            <h3 style="margin:0;">Live Logs</h3>
+                            <div class="log-toolbar">
+                                <label class="log-filter-label">
+                                    <input type="checkbox" id="log-autoscroll" checked> Auto-scroll
+                                </label>
+                                <select id="log-level-filter" onchange="renderLogs()">
+                                    <option value="ALL">All levels</option>
+                                    <option value="DEBUG">DEBUG+</option>
+                                    <option value="INFO">INFO+</option>
+                                    <option value="WARN">WARN+</option>
+                                    <option value="ERROR">ERROR+</option>
+                                </select>
+                                <button class="btn-secondary" onclick="clearLogs()">Clear</button>
+                                <button class="btn-primary" onclick="saveLog()">⬇ Save Log</button>
+                            </div>
+                        </div>
+                        <div id="log-output" class="log-output"></div>
+                        <div id="log-empty" class="log-empty" style="display:none;">No log entries yet.</div>
+                    </div>
                 </div> <!-- End of car-detail-content -->
                 </div>
             </div>
@@ -193,9 +249,10 @@
     <div id="add-modal" class="modal">
         <div class="modal-content">
             <h3>Add New Car</h3>
-            <input type="text" id="new-name" placeholder="Car Name (e.g. Racer 1)">
-            <input type="text" id="new-ip" placeholder="IP Address (e.g. 192.168.1.50)">
-            <input type="number" id="new-port" placeholder="Port" value="8000">
+            <input type="text"     id="new-name" placeholder="Car Name (e.g. Racer 1)">
+            <input type="text"     id="new-ip"   placeholder="IP Address (e.g. 192.168.1.50)">
+            <input type="number"   id="new-port" placeholder="Port" value="8000">
+            <input type="password" id="new-password" placeholder="Password (must match car)">
             <div class="modal-actions">
                 <button class="btn-secondary" onclick="closeAddModal()">Cancel</button>
                 <button class="btn-primary" onclick="addCar()">Add</button>
