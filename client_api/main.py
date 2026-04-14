@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Body, WebSocket, WebSocketDisconnect, Depends, Header
+from fastapi import FastAPI, HTTPException, Body, WebSocket, WebSocketDisconnect, Depends, Header, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uvicorn
@@ -15,6 +16,10 @@ import hashlib
 import base64
 import os as _os
 import time
+from pathlib import Path
+import shutil
+import tempfile
+import subprocess
 
 # ── Encryption ──────────────────────────────────────────────────────────────
 try:
@@ -153,6 +158,63 @@ class NavigateRequest(BaseModel):
     x: float
     y: float
 
+class TrtOptimizeRequest(BaseModel):
+    experiment: int
+    architecture: str = "resnet34"
+    model_path: str
+
+# Shared experiment metadata used by inference and training pipelines.
+EXPERIMENT_FEATURES = {
+    1: ["rgb_path", "cam1_path", "ir_path", "depth_path"],
+    2: ["rgb_path", "ir_path", "depth_path"],
+    3: ["rgb_path"],
+    4: ["rgb_path", "cam1_path"],
+    5: ["rgb_path", "cam1_path", "ir_path", "depth_path"],
+    6: ["rgb_path", "cam1_path"],
+    7: ["rgb_path", "cam1_path", "ir_path"],
+    8: ["rgb_path", "ir_path"],
+}
+
+SENSOR_LABELS = {
+    "rgb_path": "Front RGB camera",
+    "cam1_path": "Rear or secondary RGB camera",
+    "ir_path": "Infrared stream from RealSense",
+    "depth_path": "Depth stream from RealSense",
+}
+
+MODEL_STORAGE_DIR = Path(__file__).resolve().parent / "uploaded_models"
+MODEL_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+_TRT_OPT_LOCK = threading.Lock()
+
+def _detect_platform() -> Dict[str, str]:
+    model = ""
+    try:
+        model = Path("/proc/device-tree/model").read_text(errors="ignore").strip().lower()
+    except Exception:
+        model = ""
+
+    platform_name = "x86"
+    if "jetson" in model or "nvidia" in model:
+        platform_name = "jetson"
+    elif "rockchip" in model or "rk" in model:
+        platform_name = "rockchip"
+    elif "arm" in _os.uname().machine.lower() if hasattr(_os, "uname") else False:
+        platform_name = "arm"
+
+    return {"platform": platform_name, "device_model": model or "unknown"}
+
+def _experiment_payload() -> List[Dict[str, Any]]:
+    payload = []
+    for exp_id, features in EXPERIMENT_FEATURES.items():
+        payload.append({
+            "experiment": exp_id,
+            "features": features,
+            "sensors": [SENSOR_LABELS.get(f, f) for f in features],
+            "description": ", ".join(SENSOR_LABELS.get(f, f) for f in features),
+        })
+    return payload
+
 @app.post("/configure")
 def configure_car(config: ClientConfig, _: None = Depends(_verify_api_key)):
     try:
@@ -193,6 +255,122 @@ def set_destination(req: NavigateRequest, _: None = Depends(_verify_api_key)):
 def cancel_navigation(_: None = Depends(_verify_api_key)):
     car.target_dest = None
     return {"status": "cancelled"}
+
+@app.get("/experiments")
+def get_experiments(_: None = Depends(_verify_api_key)):
+    return {"experiments": _experiment_payload()}
+
+@app.get("/platform")
+def get_platform(_: None = Depends(_verify_api_key)):
+    return _detect_platform()
+
+@app.post("/models/upload")
+async def upload_model(
+    file: UploadFile = File(...),
+    category: str = Form("control"),
+    _: None = Depends(_verify_api_key)
+):
+    safe_name = Path(file.filename or "model.bin").name
+    stamp = int(time.time())
+    target_dir = MODEL_STORAGE_DIR / category
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dest = target_dir / f"{stamp}_{safe_name}"
+    with dest.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+    return {
+        "status": "uploaded",
+        "path": str(dest),
+        "filename": dest.name,
+        "size": dest.stat().st_size,
+    }
+
+@app.get("/models/download")
+def download_model(path: str = Query(...), _: None = Depends(_verify_api_key)):
+    model_path = Path(path).expanduser().resolve()
+    if not model_path.exists() or not model_path.is_file():
+        raise HTTPException(status_code=404, detail="Model file not found")
+    return FileResponse(str(model_path), filename=model_path.name)
+
+@app.post("/models/optimize/tensorrt")
+def optimize_tensorrt(req: TrtOptimizeRequest, _: None = Depends(_verify_api_key)):
+    if req.experiment not in EXPERIMENT_FEATURES:
+        raise HTTPException(status_code=400, detail="Unsupported experiment")
+
+    platform_info = _detect_platform()
+    if platform_info["platform"] != "jetson":
+        raise HTTPException(status_code=400, detail="TensorRT optimization is supported only on Jetson devices")
+
+    src_model = Path(req.model_path).expanduser().resolve()
+    if not src_model.exists():
+        raise HTTPException(status_code=404, detail=f"Model not found: {src_model}")
+
+    inference_dir = Path(__file__).resolve().parents[1] / "train" / "model_training" / "inference"
+    trt_script = inference_dir / "trt_optimize.py"
+    if not trt_script.exists():
+        raise HTTPException(status_code=500, detail=f"Missing script: {trt_script}")
+
+    output_dir = MODEL_STORAGE_DIR / "optimized"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_name = f"exp{req.experiment}_{req.architecture}_{int(time.time())}_best_model_trt.pth"
+    output_file = output_dir / output_name
+
+    with _TRT_OPT_LOCK:
+        backup = None
+        working_model = inference_dir / "best_model.pth"
+        working_trt = inference_dir / "best_model_trt.pth"
+        if working_model.exists():
+            backup = inference_dir / f"best_model.backup_{int(time.time())}.pth"
+            shutil.move(str(working_model), str(backup))
+
+        try:
+            shutil.copy2(str(src_model), str(working_model))
+            cmd = [
+                sys.executable,
+                str(trt_script),
+                "--exp",
+                str(req.experiment),
+                "--arch",
+                req.architecture,
+            ]
+            proc = subprocess.run(
+                cmd,
+                cwd=str(inference_dir),
+                capture_output=True,
+                text=True,
+                timeout=1800,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr or proc.stdout or "TensorRT optimization failed")
+
+            if not working_trt.exists():
+                raise RuntimeError("TensorRT output file was not generated")
+
+            shutil.copy2(str(working_trt), str(output_file))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        finally:
+            if working_model.exists():
+                try:
+                    working_model.unlink()
+                except Exception:
+                    pass
+            if backup and backup.exists():
+                shutil.move(str(backup), str(working_model))
+
+    return {
+        "status": "optimized",
+        "platform": platform_info["platform"],
+        "optimized_path": str(output_file),
+        "filename": output_file.name,
+        "size": output_file.stat().st_size,
+        "model_info": {
+            "experiment": req.experiment,
+            "architecture": req.architecture,
+            "features": EXPERIMENT_FEATURES[req.experiment],
+            "sensors": [SENSOR_LABELS.get(f, f) for f in EXPERIMENT_FEATURES[req.experiment]],
+            "control_model_type": "tensorrt",
+        },
+    }
 
 @app.get("/status")
 def get_status(_: None = Depends(_verify_api_key)):

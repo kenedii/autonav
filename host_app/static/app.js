@@ -1,789 +1,601 @@
-// State
 let cars = [];
 let selectedCarId = null;
-let pollInterval = null;
-// Logs state
-let carLogs = {};              // car_id -> array of log entries
-let lastLogTs = {};           // car_id -> last timestamp fetched
-let logPollInterval = null;
+let pollMs = 2000;
+let pollTimer = null;
+let experiments = [];
+let uploadedDeployModelPath = "";
+let uploadedJetsonOptPath = "";
+let uploadedRockchipOptPath = "";
 
-// ── Video stream state ──────────────────────────────────────────────────────
+let statusChart = null;
+let logTimer = null;
+let logCursor = {};
+let logStore = {};
+
 let videoSocket = null;
-let videoCanvas = null;
-let videoCtx   = null;
+let videoCtx = null;
 
-// --- Tab Logic ---
-function openTab(tabName) {
-    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-    
-    document.getElementById(tabName).classList.add('active');
-    document.querySelector(`button[onclick="openTab('${tabName}')"]`).classList.add('active');
+const BACKBONE_MAP = {
+    "resnet34": "ResNet-34",
+    "resnet101": "ResNet-101",
+    "resnet152": "ResNet-152"
+};
+
+function byId(id) {
+    return document.getElementById(id);
 }
 
-function openClientTab(tabName) {
-    document.querySelectorAll('.client-tab-pane').forEach(el => {
-        el.style.display = 'none';
-        el.classList.remove('active');
+function selectedCar() {
+    return cars.find((c) => c.id === selectedCarId);
+}
+
+function getStatusDotClass(status) {
+    if (status === "online") return "dot-green";
+    if (status === "stopped") return "dot-red";
+    return "dot-gray";
+}
+
+function readBackbone(prefix) {
+    const value = byId(`${prefix}-backbone`).value;
+    if (value !== "custom") return value;
+    const custom = byId(`${prefix}-backbone-custom`).value.trim();
+    return custom || "resnet34";
+}
+
+function activeClientTab() {
+    const active = document.querySelector(".client-tab-btn.active");
+    return active ? active.dataset.clientTab : "overview";
+}
+
+function setupTopTabs() {
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const tab = btn.dataset.tab;
+            document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+            document.querySelectorAll(".tab-content").forEach((pane) => pane.classList.remove("active"));
+            btn.classList.add("active");
+            byId(tab).classList.add("active");
+        });
     });
-    document.querySelectorAll('.client-tab-btn').forEach(el => el.classList.remove('active'));
-    
-    const content = document.getElementById(`client-tab-${tabName}`);
-    if(content) {
-        content.style.display = 'block';
-        content.classList.add('active');
-    }
-    
-    // Find button to highlight (overview, specs, video, logs)
-    const btns = document.querySelectorAll('.client-tab-btn');
-    if (tabName === 'overview') btns[0].classList.add('active');
-    if (tabName === 'specs')    btns[1].classList.add('active');
-    if (tabName === 'video')    btns[2].classList.add('active');
-    if (tabName === 'logs')     btns[3].classList.add('active');
+}
 
-    // Start / stop video stream based on tab visibility
-    if (tabName !== 'video') {
-        stopVideoStream();
-    }
+function setupClientTabs() {
+    document.querySelectorAll(".client-tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const tab = btn.dataset.clientTab;
+            document.querySelectorAll(".client-tab-btn").forEach((b) => b.classList.remove("active"));
+            document.querySelectorAll(".client-tab-pane").forEach((pane) => pane.classList.remove("active"));
+            btn.classList.add("active");
+            byId(`client-tab-${tab}`).classList.add("active");
 
-    // Start / stop log polling
-    if (tabName === 'logs') {
-        startLogPolling();
-    } else {
-        stopLogPolling();
+            if (tab !== "video") {
+                stopVideoStream();
+            }
+            if (tab === "logs") {
+                startLogPolling();
+            } else {
+                stopLogPolling();
+            }
+        });
+    });
+}
+
+function setupOptimizeTabs() {
+    document.querySelectorAll(".opt-tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const tab = btn.dataset.optTab;
+            document.querySelectorAll(".opt-tab-btn").forEach((b) => b.classList.remove("active"));
+            document.querySelectorAll(".opt-pane").forEach((p) => p.classList.remove("active"));
+            btn.classList.add("active");
+            byId(`opt-tab-${tab}`).classList.add("active");
+        });
+    });
+}
+
+function setMessage(elId, text) {
+    byId(elId).textContent = text;
+}
+
+function setJson(elId, data) {
+    byId(elId).textContent = JSON.stringify(data, null, 2);
+}
+
+async function fetchHostInfo() {
+    try {
+        const res = await fetch("/api/host-info");
+        const data = await res.json();
+        setMessage("host-ip-info", `Server IP: ${data.ip}:${data.port}`);
+    } catch (e) {
+        setMessage("host-ip-info", "Server IP: unavailable");
     }
 }
 
-// --- Poll Data ---
+async function fetchExperiments() {
+    try {
+        const res = await fetch("/api/experiments");
+        const data = await res.json();
+        experiments = data.experiments || [];
+        populateExperimentSelectors();
+        refreshExperimentDescription();
+    } catch (e) {
+        console.error("Failed to fetch experiments", e);
+    }
+}
+
+function populateExperimentSelectors() {
+    const targets = ["deploy-exp", "trt-exp", "rknn-exp"];
+    targets.forEach((id) => {
+        const select = byId(id);
+        const prev = select.value;
+        select.innerHTML = "";
+        experiments.forEach((exp) => {
+            const opt = document.createElement("option");
+            opt.value = String(exp.experiment);
+            opt.textContent = `Experiment ${exp.experiment}`;
+            select.appendChild(opt);
+        });
+        if (prev) select.value = prev;
+    });
+}
+
+function refreshExperimentDescription() {
+    const exp = Number(byId("deploy-exp").value || 1);
+    const found = experiments.find((x) => x.experiment === exp);
+    if (!found) {
+        setMessage("deploy-exp-description", "No experiment metadata available.");
+        return;
+    }
+    setMessage("deploy-exp-description", `Sensors used: ${found.description}`);
+}
+
 async function fetchCars() {
     try {
-        const res = await fetch('/api/cars');
-        const data = await res.json();
-        cars = data;
+        const res = await fetch("/api/cars");
+        cars = await res.json();
         renderFleetList();
-        updateHomeStats();
-        if (selectedCarId) {
-            updateDetailView();
-        }
+        updateStats();
         updateCharts();
+        if (selectedCarId) {
+            updateDetailPanel();
+        }
     } catch (e) {
         console.error("Failed to fetch cars", e);
     }
 }
 
 function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
     fetchCars();
-    pollInterval = setInterval(fetchCars, 2000); // 2s poll
+    pollTimer = setInterval(fetchCars, pollMs);
 }
 
-async function fetchHostInfo() {
-    try {
-        const res = await fetch('/api/host-info');
-        const data = await res.json();
-        const el = document.getElementById('host-ip-info');
-        if (el) el.innerText = "Server IP: " + data.ip + ":" + data.port;
-    } catch (e) {
-        console.error("Host info error:", e);
-    }
+function updateStats() {
+    byId("stat-total").textContent = String(cars.length);
+    byId("stat-active").textContent = String(cars.filter((c) => c.status === "online").length);
 }
 
-// --- Render Logic ---
 function renderFleetList() {
-    const list = document.getElementById('car-list');
-    list.innerHTML = '';
-    
-    cars.forEach(car => {
-        const li = document.createElement('li');
-        li.className = `car-item ${selectedCarId === car.id ? 'selected' : ''}`;
-        li.onclick = () => selectCar(car.id);
-        
-        let statusClass = 'dot-gray'; // unknown
-        if (car.status === 'online') statusClass = 'dot-green';
-        if (car.status === 'stopped') statusClass = 'dot-red';
-        if (car.status === 'offline') statusClass = 'dot-gray';
-        
+    const list = byId("car-list");
+    list.innerHTML = "";
+
+    cars.forEach((car) => {
+        const li = document.createElement("li");
+        li.className = `car-item ${selectedCarId === car.id ? "selected" : ""}`;
         li.innerHTML = `
-            <div>
-                <span class="status-dot ${statusClass}"></span>
-                <strong>${car.name}</strong>
+            <div class="car-item-row">
+                <div><span class="status-dot ${getStatusDotClass(car.status)}"></span><strong>${car.name}</strong></div>
+                <small>${car.status || "unknown"}</small>
             </div>
-            <small style="color:#888;">${car.ip}</small>
+            <div class="car-ip">${car.ip}:${car.port || 8000}</div>
         `;
+        li.addEventListener("click", () => selectCar(car.id));
         list.appendChild(li);
     });
 }
 
-function selectCar(id) {
-    // Prevent recursion/re-entry by checking if we're already selecting this car
+async function selectCar(id) {
     if (selectedCarId === id) return;
-    
-    // 1. Clean up old state
     stopVideoStream();
     stopLogPolling();
 
-    // 2. Set new state
     selectedCarId = id;
-    renderFleetList(); // update active state
-    
-    document.querySelector('.empty-state').style.display = 'none';
-    document.getElementById('car-detail-content').style.display = 'block';
-    
-    // Trigger immediate refresh of this specific car's status to get live data
-    fetch(`/api/cars/${id}/status`); 
-    
-    updateDetailView();
+    uploadedDeployModelPath = "";
+    uploadedJetsonOptPath = "";
+    uploadedRockchipOptPath = "";
+    setMessage("uploaded-model-label", "No file uploaded");
+    setMessage("trt-upload-state", "No model uploaded");
+    setMessage("rknn-upload-state", "No model uploaded");
+    setMessage("deploy-model-path", "");
+    setJson("deploy-result", { status: "waiting" });
+    setJson("optimize-result", { status: "waiting" });
+    disableDownload();
 
-    // 3. Resume polling if tabs are active
-    const logsPane = document.getElementById('client-tab-logs');
-    if (logsPane && logsPane.classList.contains('active')) {
-        startLogPolling();
+    renderFleetList();
+
+    byId("empty-state").classList.add("hidden");
+    byId("car-detail-content").classList.remove("hidden");
+
+    try {
+        await fetch(`/api/cars/${id}/status`);
+    } catch (e) {
+        console.error(e);
     }
+
+    await updateDetailPanel();
 }
 
-function updateDetailView() {
-    if (!selectedCarId) return;
-    const car = cars.find(c => c.id === selectedCarId);
+async function updateDetailPanel() {
+    const car = selectedCar();
     if (!car) return;
 
-    document.getElementById('detail-name').innerText = car.name;
-    document.getElementById('detail-status').innerText = car.status.toUpperCase();
-    document.getElementById('detail-ip').innerText = `${car.ip}:${car.port}`;
-    
-    // Geo
+    byId("detail-name").textContent = car.name;
+    byId("detail-ip").textContent = `${car.ip}:${car.port || 8000}`;
+    byId("detail-status").textContent = (car.status || "unknown").toUpperCase();
+
     const geo = car.geo || {};
-    document.getElementById('detail-geo').innerText = 
-        geo.city ? `${geo.city}, ${geo.country}` : 'Unknown / Local';
+    byId("detail-geo").textContent = geo.city ? `${geo.city}, ${geo.country}` : "Unknown / Local";
 
-    // Details from deep state
-    const d = car.details || {};
-    
-    if (d.error) {
-        document.getElementById('detail-activity').innerHTML = `<span style="color:red">Error: ${d.error}</span>`;
-    } else {
-        const running = d.running ? "Running" : "Stopped";
-        document.getElementById('detail-activity').innerText = running + (d.paused ? " (Paused)" : "");
-    }
-    
-    const fps = d.state?.fps || 0;
-    document.getElementById('detail-fps').innerText = fps;
+    const details = car.details || {};
+    byId("detail-activity").textContent = details.running ? (details.paused ? "Running (Paused)" : "Running") : "Stopped";
+    byId("detail-fps").textContent = String(details.state?.fps || 0);
+    byId("spec-inference").textContent = details.state?.specs?.inference || "Unknown";
 
-    // IMU Data
-    const loc = d.state?.location || {};
-    const imu = loc.imu || {};
-    if (imu.accel) {
-        document.getElementById('imu-accel').innerText = 
-            `X:${imu.accel[0].toFixed(2)} Y:${imu.accel[1].toFixed(2)} Z:${imu.accel[2].toFixed(2)}`;
-    } else {
-        document.getElementById('imu-accel').innerText = "N/A";
-    }
-    if (imu.gyro) {
-        document.getElementById('imu-gyro').innerText = 
-            `X:${imu.gyro[0].toFixed(2)} Y:${imu.gyro[1].toFixed(2)} Z:${imu.gyro[2].toFixed(2)}`;
-    } else {
-        document.getElementById('imu-gyro').innerText = "N/A";
-    }
+    const specs = details.state?.specs || {};
+    const modelSummary = {
+        backend: car.details?.config?.control_model_type || "unknown",
+        model_path: car.details?.config?.control_model || "not set",
+        architecture: car.details?.config?.architecture || specs.resnet_version || "unknown",
+        experiment: car.details?.config?.experiment || "unknown",
+        sensors: car.details?.config?.experiment_sensors || [],
+        front_camera: car.details?.config?.front_camera || "not set",
+        rear_camera: car.details?.config?.rear_camera || "not set"
+    };
+    setJson("loaded-model-info", modelSummary);
 
-    // Current settings
-    // If we just loaded, we might want to sync UI with current throttle...
-    // But since backend doesn't always send settings back in basic status, we rely on user input.
+    populateCameraOptions(specs.cameras || []);
+    await refreshPlatformBadge();
 
-    // Detections
-    const detList = document.getElementById('detection-list');
-    detList.innerHTML = '';
-    const dets = d.state?.detections || [];
-    if (dets.length === 0) {
-        detList.innerHTML = '<li>No objects detected</li>';
-    } else {
-        dets.forEach(obj => {
-            const dist = obj.distance ? (obj.distance/1000).toFixed(2) + 'm' : 'N/A';
-            const li = document.createElement('li');
-            li.innerHTML = `Class: <strong>${obj.class}</strong> | Dist: <strong>${dist}</strong> | Conf: ${(obj.conf*100).toFixed(0)}%`;
-            detList.appendChild(li);
-        });
-    }
-
-    // Call SLAM Draw
-    if (d.state?.location) {
-       // Draw Map update
-       // We need to pass the whole state or just location
-       // Let's pass the car object or details
-       drawSlamMap(car);
-    }
-
-    // Update Specs Tab
-    const specs = d.state?.specs || {}; 
-    document.getElementById('spec-device').innerText = specs.device || 'Unknown';
-    document.getElementById('spec-cpu').innerText = specs.cpu_ram || 'Unknown';
-    
-    // Format cameras nicely
-    let camText = 'None';
-    const cameraSelect = document.getElementById('camera-select');
-    if (cameraSelect) {
-        cameraSelect.innerHTML = ''; // Clear existing options
-    }
-    
-    if (specs.cameras && Array.isArray(specs.cameras)) {
-        camText = specs.cameras.map(c => `${c.type} (${c.width}x${c.height})`).join(', ');
-        
-        // Populate the dropdown
-        if (cameraSelect) {
-            specs.cameras.forEach((c, idx) => {
-                const opt = document.createElement('option');
-                opt.value = c.index !== undefined ? c.index : idx;
-                opt.text = `Camera ${opt.value}: ${c.type} (${c.width}x${c.height})`;
-                cameraSelect.appendChild(opt);
-            });
-        }
-    } else if (specs.cameras) {
-        camText = specs.cameras;
-        // Fallback for string-based camera info
-        if (cameraSelect) {
-            const opt = document.createElement('option');
-            opt.value = "0";
-            opt.text = "Camera 0";
-            cameraSelect.appendChild(opt);
-        }
-    } else {
-        if (cameraSelect) {
-            const opt = document.createElement('option');
-            opt.value = "0";
-            opt.text = "Camera 0";
-            cameraSelect.appendChild(opt);
-        }
-    }
-    document.getElementById('spec-cameras').innerText = camText;
-    
-    document.getElementById('spec-inference').innerText = specs.inference || 'Unknown';
-    document.getElementById('spec-resnet').innerText = specs.resnet_version || 'Unknown';
-    document.getElementById('spec-yolo').innerText = specs.yolo_version || 'Unknown';
+    if (activeClientTab() === "logs") startLogPolling();
 }
 
-function updateHomeStats() {
-    const total = cars.length;
-    const active = cars.filter(c => c.status === 'online').length;
-    document.getElementById('stat-total').innerText = total;
-    document.getElementById('stat-active').innerText = active;
-}
+function populateCameraOptions(cameras) {
+    const select = byId("camera-select");
+    select.innerHTML = "";
 
-// --- Actions ---
-async function addTestClient() {
-    try {
-        const res = await fetch('/api/test-client', { method: 'POST' });
-        if(!res.ok) throw new Error(await res.text());
-        fetchCars();
-    } catch(e) {
-        alert("Error adding test client: " + e.message);
+    if (!Array.isArray(cameras) || cameras.length === 0) {
+        const opt = document.createElement("option");
+        opt.value = "0";
+        opt.textContent = "Camera 0";
+        select.appendChild(opt);
+        return;
     }
-}
 
-// Deprecated: was for manual add
-async function addCar() {
-    const name     = document.getElementById('new-name').value;
-    const ip       = document.getElementById('new-ip').value;
-    const port     = document.getElementById('new-port').value;
-    const password = document.getElementById('new-password').value || 'changeme';
-
-    if (!name || !ip) return alert("Fill all fields");
-
-    await fetch('/api/cars', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name, ip, port: parseInt(port), password})
+    cameras.forEach((cam, index) => {
+        const opt = document.createElement("option");
+        const camIndex = cam.index !== undefined ? cam.index : index;
+        opt.value = String(camIndex);
+        opt.textContent = `Camera ${camIndex}: ${cam.type || "camera"}`;
+        select.appendChild(opt);
     });
+}
 
-    closeAddModal();
-    fetchCars();
+async function addTestClient() {
+    await fetch("/api/test-client", { method: "POST" });
+    await fetchCars();
 }
 
 async function deleteCar() {
-    if(!selectedCarId) return;
-    if(!confirm("Remove this car?")) return;
-    await fetch(`/api/cars/${selectedCarId}`, {method: 'DELETE'});
+    if (!selectedCarId) return;
+    if (!window.confirm("Remove this car from fleet?")) return;
+    await fetch(`/api/cars/${selectedCarId}`, { method: "DELETE" });
     selectedCarId = null;
-    document.getElementById('car-detail-content').style.display = 'none';
-    document.querySelector('.empty-state').style.display = 'block';
-    fetchCars();
+    byId("car-detail-content").classList.add("hidden");
+    byId("empty-state").classList.remove("hidden");
+    await fetchCars();
 }
 
 async function controlAction(action) {
-    if(!selectedCarId) return;
-    await fetch(`/api/cars/${selectedCarId}/${action}`, {method: 'POST'});
-    // Provide immediate feedback
-    alert(`Sent ${action.toUpperCase()} command.`);
+    if (!selectedCarId) return;
+    await fetch(`/api/cars/${selectedCarId}/${action}`, { method: "POST" });
+    setJson("deploy-result", { status: `sent ${action}` });
+    await fetchCars();
 }
 
 async function updateSettings() {
-    if(!selectedCarId) return;
-    const mode = document.getElementById('tune-mode').value;
-    const throttle = parseFloat(document.getElementById('tune-throttle').value);
-    
-    await fetch(`/api/cars/${selectedCarId}/settings`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            throttle_mode: mode,
-            fixed_throttle_value: throttle
-        })
-    });
-}
-
-// --- Modal ---
-function showAddModal() { document.getElementById('add-modal').style.display = 'flex'; }
-function closeAddModal() { document.getElementById('add-modal').style.display = 'none'; }
-
-// --- Config Modal ---
-function openConfigModal() {
-    if(!selectedCarId) return;
-    const car = cars.find(c => c.id === selectedCarId);
-    if (!car) return;
-
-    document.getElementById('config-modal').style.display = 'flex';
-    
-    // Populate with current car configuration if available
-    const cfg = car.details?.config || {};
-    if (Object.keys(cfg).length > 0) {
-        if (cfg.cameras && cfg.cameras.length > 0) {
-            const cam = cfg.cameras[0];
-            document.getElementById('cfg-cam-type').value = cam.type || 'realsense';
-            document.getElementById('cfg-cam-w').value = cam.width || 640;
-            document.getElementById('cfg-cam-h').value = cam.height || 480;
-            document.getElementById('cfg-cam-fps').value = cam.fps || 15;
-        }
-        document.getElementById('cfg-ctl-type').value = cfg.control_model_type || 'tensorrt';
-        document.getElementById('cfg-ctl-arch').value = cfg.architecture || 'resnet101';
-        document.getElementById('cfg-ctl-path').value = cfg.control_model || '';
-        document.getElementById('cfg-det-path').value = cfg.detection_model || '';
-        document.getElementById('cfg-device').value = cfg.device || 'cuda';
-        document.getElementById('cfg-actions').value = (cfg.action_loop || ['control', 'api']).join(',');
-    }
-}
-
-function closeConfigModal() {
-    document.getElementById('config-modal').style.display = 'none';
-}
-
-function resetConfigToDefaults() {
-    document.getElementById('cfg-cam-type').value = 'realsense';
-    document.getElementById('cfg-cam-w').value = '640';
-    document.getElementById('cfg-cam-h').value = '480';
-    document.getElementById('cfg-cam-fps').value = '15';
-    document.getElementById('cfg-ctl-type').value = 'tensorrt';
-    document.getElementById('cfg-ctl-arch').value = 'resnet101';
-    document.getElementById('cfg-ctl-path').value = '/home/jetson/jetracer_run/checkpoints/checkpoints/model_7_resnet101/best_model_trt.pth';
-    document.getElementById('cfg-det-path').value = '';
-    document.getElementById('cfg-device').value = 'cuda';
-    document.getElementById('cfg-actions').value = 'control,detection,api';
-}
-
-async function deployConfig() {
-    if(!selectedCarId) return;
-    
-    const config = {
-        device: document.getElementById('cfg-device').value,
-        architecture: document.getElementById('cfg-ctl-arch').value,
-        cameras: [{
-            type: document.getElementById('cfg-cam-type').value,
-            width: parseInt(document.getElementById('cfg-cam-w').value),
-            height: parseInt(document.getElementById('cfg-cam-h').value),
-            fps: parseInt(document.getElementById('cfg-cam-fps').value),
-            index: 0
-        }],
-        control_model_type: document.getElementById('cfg-ctl-type').value,
-        control_model: document.getElementById('cfg-ctl-path').value,
-        detection_model: document.getElementById('cfg-det-path').value,
-        action_loop: document.getElementById('cfg-actions').value.split(',').map(s=>s.trim()),
-        ip: "0.0.0.0", // overridden by server proxy
-        port: 8000,
-        password: "changeme"
-    };
-
-    try {
-        const res = await fetch(`/api/cars/${selectedCarId}/config`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({config: config})
-        });
-        const data = await res.json();
-        // Treat both "configured" (HTTP) and "sent_via_ws" (WebSocket) as success
-        if(data.status === 'configured' || data.status === 'sent_via_ws') {
-            alert("Configuration Deployed Successfully!");
-            closeConfigModal();
-        } else {
-            alert("Error: " + JSON.stringify(data));
-        }
-    } catch(e) {
-        alert("Deploy failed: " + e);
-    }
-}
-
-// --- Global Settings ---
-function saveGlobalSettings() {
-    const poll = document.getElementById('setting-poll').value;
-    // Update poll interval
-    if (pollInterval) clearInterval(pollInterval);
-    setInterval(fetchCars, parseInt(poll));
-    alert("Settings Saved");
-}
-
-// --- Charts ---
-let statusChart = null;
-
-function updateCharts() {
-    // Simple Status Pie Chart
-    const ctx = document.getElementById('statusChart').getContext('2d');
-    const online = cars.filter(c => c.status === 'online').length;
-    const stopped = cars.filter(c => c.status === 'stopped').length;
-    const offline = cars.filter(c => c.status === 'offline' || c.status === 'unknown').length;
-    
-    if (statusChart) {
-        statusChart.data.datasets[0].data = [online, stopped, offline];
-        statusChart.update();
-    } else {
-        statusChart = new Chart(ctx, {
-            type: 'doughnut',
-            data: {
-                labels: ['Running', 'Stopped', 'Offline'],
-                datasets: [{
-                    data: [online, stopped, offline],
-                    backgroundColor: ['#28a745', '#dc3545', '#6c757d']
-                }]
-            },
-            options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
-        });
-    }
-}
-
-// --- SLAM Frontend ---
-let mapScale = 50.0; // pixels per meter
-let mapCanvas = null;
-let mapCtx = null;
-let selectedDestination = null;
-
-function setupMapCanvas() {
-    mapCanvas = document.getElementById('slam-map');
-    if (!mapCanvas) return;
-    
-    mapCtx = mapCanvas.getContext('2d');
-    
-    // Support clicking to set destination
-    mapCanvas.addEventListener('mousedown', async (e) => {
-        if (!selectedCarId) return;
-        
-        const rect = mapCanvas.getBoundingClientRect();
-        const clickX = e.clientX - rect.left;
-        const clickY = e.clientY - rect.top;
-        
-        // Convert screen to world
-        // Center is (width/2, height/2)
-        // World 0,0 is at center
-        // X is Right, Y is Up (in screen, Y is Down)
-        const centerX = mapCanvas.width / 2;
-        const centerY = mapCanvas.height / 2;
-        
-        const worldX = (clickX - centerX) / mapScale;
-        const worldY = -(clickY - centerY) / mapScale; // invert Y
-        
-        selectedDestination = {x: worldX, y: worldY};
-        
-        // Send command
-        try {
-            await fetch(`/api/cars/${selectedCarId}/navigate`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({x: worldX, y: worldY})
-            });
-            console.log("Navigating to", worldX, worldY);
-        } catch(e) {
-            console.error(e);
-        }
-    });
-}
-
-function drawSlamMap(car) {
-    if (!mapCtx) setupMapCanvas();
-    if (!mapCtx) return;
-    
-    const w = mapCanvas.width;
-    const h = mapCanvas.height;
-    const cx = w / 2;
-    const cy = h / 2;
-    
-    // Clear
-    mapCtx.fillStyle = "#000";
-    mapCtx.fillRect(0, 0, w, h);
-    
-    // Draw Grid (1m lines)
-    mapCtx.strokeStyle = "#333";
-    mapCtx.lineWidth = 1;
-    mapCtx.beginPath();
-    
-    // Vertical lines
-    for(let x=-10; x<=10; x++) {
-        const sx = cx + x * mapScale;
-        mapCtx.moveTo(sx, 0); mapCtx.lineTo(sx, h);
-    }
-    // Horizontal lines
-    for(let y=-10; y<=10; y++) {
-        const sy = cy - y * mapScale;
-        mapCtx.moveTo(0, sy); mapCtx.lineTo(w, sy);
-    }
-    mapCtx.stroke();
-    
-    // Origin
-    mapCtx.fillStyle = "#555";
-    mapCtx.beginPath();
-    mapCtx.arc(cx, cy, 3, 0, 2*Math.PI);
-    mapCtx.fill();
-    
-    // Get state
-    const state = car.details?.state || {};
-    const loc = state.location || {x: 0, y: 0, theta: 0};
-    
-    document.getElementById('slam-coords').innerText = 
-        `X: ${loc.x.toFixed(2)} Y: ${loc.y.toFixed(2)} θ: ${(loc.theta * 180 / Math.PI).toFixed(0)}°`;
-    
-    // Draw Trajectory
-    if (loc.trajectory && loc.trajectory.length > 0) {
-        mapCtx.strokeStyle = "#0ff";
-        mapCtx.lineWidth = 2;
-        mapCtx.beginPath();
-        loc.trajectory.forEach((pt, i) => {
-            const sx = cx + pt[0] * mapScale;
-            const sy = cy - pt[1] * mapScale;
-            if (i===0) mapCtx.moveTo(sx, sy);
-            else mapCtx.lineTo(sx, sy);
-        });
-        // Draw line to current
-        const currSx = cx + loc.x * mapScale;
-        const currSy = cy - loc.y * mapScale;
-        mapCtx.lineTo(currSx, currSy);
-        mapCtx.stroke();
-    }
-    
-    // Draw Destination
-    if (selectedDestination) {
-        const dx = cx + selectedDestination.x * mapScale;
-        const dy = cy - selectedDestination.y * mapScale;
-        
-        mapCtx.strokeStyle = "#f0f"; // Magenta target
-        mapCtx.beginPath();
-        mapCtx.arc(dx, dy, 5, 0, 2*Math.PI);
-        mapCtx.stroke();
-        
-        // Line to target
-        mapCtx.setLineDash([5, 5]);
-        mapCtx.beginPath();
-        mapCtx.moveTo(cx + loc.x * mapScale, cy - loc.y * mapScale);
-        mapCtx.lineTo(dx, dy);
-        mapCtx.stroke();
-        mapCtx.setLineDash([]);
-    }
-    
-    // Draw Car
-    const carSx = cx + loc.x * mapScale;
-    const carSy = cy - loc.y * mapScale;
-    
-    mapCtx.save();
-    mapCtx.translate(carSx, carSy);
-    mapCtx.rotate(-loc.theta); // -theta because canvas Y is down? No, standard rotate is CW. Theta is CCW normally.
-    // If loc.theta is standard math angle (CCW from X), and Canvas Y is inverted...
-    // World: +Y is Up. Screen: +Y is Down.
-    // Math: +Angle is CCW. Screen: +Angle is CW.
-    // So to draw CCW angle on inverted Y, we need -angle.
-    
-    // Car Body
-    mapCtx.fillStyle = "#0f0";
-    mapCtx.fillRect(-10, -5, 20, 10); // 20px long car
-    
-    // Direction Indicator
-    mapCtx.fillStyle = "#fff";
-    mapCtx.fillRect(5, -5, 5, 10); // Front lights
-    
-    mapCtx.restore();
-}
-
-// ── Logs fetching & rendering ───────────────────────────────────────────
-function _formatTs(ts) {
-    try {
-        const d = new Date(ts * 1000);
-        return d.toISOString().replace('T', ' ').replace('Z', '');
-    } catch (e) { return ts; }
-}
-
-async function fetchLogs() {
     if (!selectedCarId) return;
-    try {
-        const since = lastLogTs[selectedCarId] || 0;
-        const encodedId = encodeURIComponent(selectedCarId);
-        const res = await fetch(`/api/cars/${encodedId}/logs?since=${since}`);
-        if (!res.ok) return;
-        const data = await res.json();
-        const entries = data.logs || [];
-        if (!carLogs[selectedCarId]) carLogs[selectedCarId] = [];
-        if (entries.length > 0) {
-            entries.forEach(e => carLogs[selectedCarId].push(e));
-            lastLogTs[selectedCarId] = entries[entries.length-1].timestamp || lastLogTs[selectedCarId] || Date.now()/1000;
-            renderLogs();
-        }
-    } catch (e) {
-        console.error('Failed to fetch logs', e);
-    }
+    const throttle_mode = byId("tune-mode").value;
+    const fixed_throttle_value = Number(byId("tune-throttle").value || 0.22);
+    await fetch(`/api/cars/${selectedCarId}/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ throttle_mode, fixed_throttle_value })
+    });
+    setJson("deploy-result", { status: "settings updated", throttle_mode, fixed_throttle_value });
 }
 
-function renderLogs() {
-    const out = document.getElementById('log-output');
-    const empty = document.getElementById('log-empty');
-    if (!out || !selectedCarId) return;
-    const all = carLogs[selectedCarId] || [];
-    if (all.length === 0) {
-        out.innerHTML = '';
-        empty.style.display = 'block';
+async function uploadDeployModel() {
+    if (!selectedCarId) return;
+    const file = byId("deploy-model-file").files[0];
+    if (!file) {
+        setMessage("uploaded-model-label", "Select a model file first");
         return;
     }
-    empty.style.display = 'none';
 
-    const levelFilter = document.getElementById('log-level-filter')?.value || 'ALL';
-    const autoScroll = document.getElementById('log-autoscroll')?.checked;
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("category", "control");
 
-    // Map level order
-    const order = { 'DEBUG': 10, 'INFO': 20, 'WARN': 30, 'WARNING':30, 'ERROR': 40, 'CRITICAL':50 };
-    const minLevel = levelFilter === 'ALL' ? 0 : order[levelFilter] || 0;
-
-    // Build HTML
-    let html = '';
-    all.forEach(entry => {
-        const lvl = (entry.level || 'INFO').toUpperCase();
-        const lvlVal = order[lvl] || 20;
-        if (lvlVal < minLevel) return;
-        const ts = _formatTs(entry.timestamp || (Date.now()/1000));
-        const msg = entry.message || '';
-        html += `<div class="log-entry"><span class="log-ts">${ts}</span>` +
-                `<span class="log-level log-level-${lvl}">${lvl}</span>` +
-                `<span class="log-msg">${escapeHtml(msg)}</span></div>`;
+    const res = await fetch(`/api/cars/${selectedCarId}/models/upload`, {
+        method: "POST",
+        body: fd
     });
-    out.innerHTML = html;
-    if (autoScroll) out.scrollTop = out.scrollHeight;
-}
-
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function(c){
-        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c];
-    });
-}
-
-function saveLog() {
-    if (!selectedCarId) return alert('No car selected');
-    const entries = carLogs[selectedCarId] || [];
-    let text = entries.map(e => `${_formatTs(e.timestamp)} [${e.level}] ${e.message}`).join('\n');
-    const blob = new Blob([text], {type: 'text/plain'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${selectedCarId.replace(/[:\\/]/g,'_')}_log.txt`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-}
-
-async function clearLogs() {
-    if (!selectedCarId) return;
-    if (!confirm('Clear logs for this client on the server?')) return;
-    const encodedId = encodeURIComponent(selectedCarId);
-    try {
-        const res = await fetch(`/api/cars/${encodedId}/logs`, { method: 'DELETE' });
-        if (res.ok) {
-            carLogs[selectedCarId] = [];
-            lastLogTs[selectedCarId] = 0;
-            renderLogs();
-        } else {
-            alert('Failed to clear logs');
-        }
-    } catch (e) { console.error(e); alert('Error clearing logs'); }
-}
-
-function startLogPolling() {
-    if (!selectedCarId) return;
-    if (logPollInterval) clearInterval(logPollInterval);
-    // initialize storage
-    if (!carLogs[selectedCarId]) carLogs[selectedCarId] = [];
-    if (!lastLogTs[selectedCarId]) lastLogTs[selectedCarId] = 0;
-    fetchLogs();
-    logPollInterval = setInterval(fetchLogs, 1500);
-}
-
-function stopLogPolling() {
-    if (logPollInterval) { clearInterval(logPollInterval); logPollInterval = null; }
-}
-
-async function cancelNavigation() {
-    if (!selectedCarId) return;
-    selectedDestination = null;
-    await fetch(`/api/cars/${selectedCarId}/navigate/cancel`, {method: 'POST'});
-}
-
-// ── Live Video Stream ─────────────────────────────────────────────────────
-function startVideoStream() {
-    if (!selectedCarId) return;
-    stopVideoStream(); // close any existing stream first
-
-    videoCanvas = document.getElementById('video-canvas');
-    if (!videoCanvas) return;
-    videoCtx = videoCanvas.getContext('2d');
-
-    // Update status indicator
-    const status = document.getElementById('video-status');
-    if (status) status.innerText = 'Connecting…';
-
-    // The car_id in the URL must be URL-encoded because it contains ':'
-    const encodedId = encodeURIComponent(selectedCarId);
-    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    
-    let camIdx = "0";
-    const camSelect = document.getElementById('camera-select');
-    if (camSelect && camSelect.value) {
-        camIdx = camSelect.value;
+    const data = await res.json();
+    if (!res.ok) {
+        setJson("deploy-result", data);
+        return;
     }
-    
-    let fps = "5";
-    const fpsSelect = document.getElementById('fps-select');
-    if (fpsSelect && fpsSelect.value) {
-        fps = fpsSelect.value;
-    }
-    
-    const wsUrl = `${wsProto}://${location.host}/ws/video/${encodedId}?camera_index=${camIdx}&fps=${fps}`;
+    uploadedDeployModelPath = data.path;
+    byId("deploy-model-path").value = data.path;
+    setMessage("uploaded-model-label", `Uploaded: ${data.filename}`);
+}
 
-    videoSocket = new WebSocket(wsUrl);
-    videoSocket.binaryType = 'arraybuffer';
-
-    videoSocket.onopen = () => {
-        if (status) status.innerText = 'Streaming ▶';
+function buildCamerasFromForm() {
+    const front = {
+        role: "front",
+        type: byId("front-cam-source").value,
+        index: Number(byId("front-cam-index").value || 0),
+        width: 640,
+        height: 480,
+        fps: 15
     };
 
-    videoSocket.onmessage = (event) => {
-        if (!(event.data instanceof ArrayBuffer)) return;
-        // Decode JPEG bytes into an image and draw on canvas
-        const blob = new Blob([event.data], { type: 'image/jpeg' });
-        const url  = URL.createObjectURL(blob);
-        const img  = new Image();
+    const useRear = byId("rear-enabled").checked;
+    const cameras = [front];
+
+    if (useRear) {
+        cameras.push({
+            role: "rear",
+            type: byId("rear-cam-source").value,
+            index: Number(byId("rear-cam-index").value || 1),
+            width: 640,
+            height: 480,
+            fps: 15
+        });
+    }
+
+    return cameras;
+}
+
+async function deployControlModel() {
+    if (!selectedCarId) return;
+    const experiment = Number(byId("deploy-exp").value || 1);
+    const expInfo = experiments.find((e) => e.experiment === experiment);
+    const architecture = readBackbone("deploy");
+    const modelPath = byId("deploy-model-path").value.trim();
+
+    if (!modelPath) {
+        setJson("deploy-result", { error: "Upload model before deploying." });
+        return;
+    }
+
+    const cameras = buildCamerasFromForm();
+    const config = {
+        device: "cuda",
+        architecture,
+        experiment,
+        experiment_features: expInfo ? expInfo.features : [],
+        experiment_sensors: expInfo ? expInfo.sensors : [],
+        front_camera: {
+            driver: byId("front-cam-source").value,
+            index: Number(byId("front-cam-index").value || 0)
+        },
+        rear_camera: byId("rear-enabled").checked ? {
+            driver: byId("rear-cam-source").value,
+            index: Number(byId("rear-cam-index").value || 1)
+        } : null,
+        use_depth: byId("use-depth").checked,
+        use_ir: byId("use-ir").checked,
+        cameras,
+        control_model_type: byId("deploy-model-backend").value,
+        control_model: modelPath,
+        detection_model: "yolov8n.pt",
+        throttle_mode: byId("tune-mode").value,
+        fixed_throttle_value: Number(byId("tune-throttle").value || 0.22),
+        action_loop: ["control", "api"]
+    };
+
+    const res = await fetch(`/api/cars/${selectedCarId}/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config })
+    });
+    const data = await res.json();
+    setJson("deploy-result", data);
+
+    if (res.ok) {
+        setJson("loaded-model-info", {
+            deployed: true,
+            backend: config.control_model_type,
+            architecture: config.architecture,
+            experiment: config.experiment,
+            sensors: config.experiment_sensors,
+            model_path: config.control_model,
+            front_camera: config.front_camera,
+            rear_camera: config.rear_camera,
+            use_depth: config.use_depth,
+            use_ir: config.use_ir
+        });
+    }
+}
+
+async function refreshPlatformBadge() {
+    if (!selectedCarId) return;
+    try {
+        const res = await fetch(`/api/cars/${selectedCarId}/platform`);
+        const data = await res.json();
+        setMessage("platform-badge", `Platform: ${data.platform || "unknown"}`);
+
+        if ((data.platform || "").toLowerCase() === "jetson") {
+            byId("opt-tab-jetson").classList.add("active");
+            byId("opt-tab-rockchip").classList.remove("active");
+            document.querySelectorAll(".opt-tab-btn").forEach((b) => b.classList.remove("active"));
+            document.querySelector('.opt-tab-btn[data-opt-tab="jetson"]').classList.add("active");
+        } else if ((data.platform || "").toLowerCase() === "rockchip") {
+            byId("opt-tab-rockchip").classList.add("active");
+            byId("opt-tab-jetson").classList.remove("active");
+            document.querySelectorAll(".opt-tab-btn").forEach((b) => b.classList.remove("active"));
+            document.querySelector('.opt-tab-btn[data-opt-tab="rockchip"]').classList.add("active");
+        }
+    } catch (e) {
+        setMessage("platform-badge", "Platform: unknown");
+    }
+}
+
+async function uploadJetsonOptimizeModel() {
+    if (!selectedCarId) return;
+    const file = byId("trt-model-file").files[0];
+    if (!file) {
+        setMessage("trt-upload-state", "Select a model file first");
+        return;
+    }
+
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("category", "optimize");
+
+    const res = await fetch(`/api/cars/${selectedCarId}/models/upload`, { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+        setJson("optimize-result", data);
+        return;
+    }
+    uploadedJetsonOptPath = data.path;
+    setMessage("trt-upload-state", `Uploaded: ${data.filename}`);
+}
+
+async function runTensorRtOptimize() {
+    if (!selectedCarId) return;
+    if (!uploadedJetsonOptPath) {
+        setJson("optimize-result", { error: "Upload a model to the car before optimization." });
+        return;
+    }
+
+    setJson("optimize-result", { status: "running TensorRT optimization" });
+
+    const payload = {
+        experiment: Number(byId("trt-exp").value || 1),
+        architecture: byId("trt-arch").value,
+        model_path: uploadedJetsonOptPath
+    };
+
+    const res = await fetch(`/api/cars/${selectedCarId}/models/optimize/tensorrt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    setJson("optimize-result", data);
+
+    if (res.ok && data.artifact_id) {
+        enableDownload(data.artifact_id, data.filename || "best_model_trt.pth");
+    }
+}
+
+async function uploadRockchipOptimizeModel() {
+    const file = byId("rknn-model-file").files[0];
+    if (!file) {
+        setMessage("rknn-upload-state", "Select a model file first");
+        return;
+    }
+
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("category", "rockchip");
+
+    const res = await fetch("/api/host/models/upload", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+        setJson("optimize-result", data);
+        return;
+    }
+
+    uploadedRockchipOptPath = data.path;
+    setMessage("rknn-upload-state", `Uploaded: ${data.filename}`);
+}
+
+async function runRknnOptimize() {
+    if (!uploadedRockchipOptPath) {
+        setJson("optimize-result", { error: "Upload a model to the host before RKNN optimization." });
+        return;
+    }
+
+    setJson("optimize-result", { status: "running RKNN optimization on x86 host" });
+
+    const payload = {
+        experiment: Number(byId("rknn-exp").value || 1),
+        architecture: byId("rknn-arch").value,
+        model_path: uploadedRockchipOptPath,
+        timeout: 3600
+    };
+
+    const res = await fetch("/api/optimize/rknn/x86", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    setJson("optimize-result", data);
+    if (res.ok && data.artifact_id) {
+        enableDownload(data.artifact_id, data.filename || "best_model.rknn");
+    }
+}
+
+function enableDownload(artifactId, filename) {
+    const link = byId("download-optimized-link");
+    link.href = `/api/artifacts/${artifactId}/download`;
+    link.download = filename;
+    link.classList.remove("disabled-link");
+}
+
+function disableDownload() {
+    const link = byId("download-optimized-link");
+    link.href = "#";
+    link.download = "";
+    link.classList.add("disabled-link");
+}
+
+function startVideoStream() {
+    if (!selectedCarId) return;
+    stopVideoStream();
+
+    const canvas = byId("video-canvas");
+    if (!videoCtx) videoCtx = canvas.getContext("2d");
+
+    const encodedId = encodeURIComponent(selectedCarId);
+    const cameraIndex = Number(byId("camera-select").value || 0);
+    const fps = Number(byId("fps-select").value || 5);
+    const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl = `${wsProto}://${window.location.host}/ws/video/${encodedId}?camera_index=${cameraIndex}&fps=${fps}`;
+
+    videoSocket = new WebSocket(wsUrl);
+    videoSocket.binaryType = "arraybuffer";
+    setMessage("video-status", "Connecting...");
+
+    videoSocket.onopen = () => setMessage("video-status", "Streaming");
+    videoSocket.onclose = () => setMessage("video-status", "Stopped");
+    videoSocket.onerror = () => setMessage("video-status", "Error");
+
+    videoSocket.onmessage = (ev) => {
+        if (!(ev.data instanceof ArrayBuffer)) return;
+        const blob = new Blob([ev.data], { type: "image/jpeg" });
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
         img.onload = () => {
-            // Resize canvas to match the frame dimensions
-            if (videoCanvas.width  !== img.width)  videoCanvas.width  = img.width;
-            if (videoCanvas.height !== img.height) videoCanvas.height = img.height;
-            videoCtx.drawImage(img, 0, 0);
+            videoCtx.drawImage(img, 0, 0, canvas.width, canvas.height);
             URL.revokeObjectURL(url);
         };
         img.src = url;
-    };
-
-    videoSocket.onerror = (e) => {
-        if (status) status.innerText = 'Error ✖';
-        console.error('[Video WS] error', e);
-    };
-
-    videoSocket.onclose = (e) => {
-        if (status) status.innerText = `Disconnected (${e.code})`;
-        videoSocket = null;
     };
 }
 
@@ -792,21 +604,166 @@ function stopVideoStream() {
         videoSocket.close();
         videoSocket = null;
     }
-    const status = document.getElementById('video-status');
-    if (status) status.innerText = 'Stopped';
+    setMessage("video-status", "Stopped");
 }
 
-// Removed wrappedSelectCar definition to prevent recursion
+async function fetchLogs() {
+    if (!selectedCarId) return;
+    const since = logCursor[selectedCarId] || 0;
+    try {
+        const res = await fetch(`/api/cars/${selectedCarId}/logs?since=${since}`);
+        const data = await res.json();
+        const newLogs = data.logs || [];
+        if (!logStore[selectedCarId]) logStore[selectedCarId] = [];
+        logStore[selectedCarId] = logStore[selectedCarId].concat(newLogs);
 
-// Init
-window.onclick = function(event) {
-    if (event.target == document.getElementById('add-modal')) {
-        closeAddModal();
-    }
-    if (event.target == document.getElementById('config-modal')) {
-        closeConfigModal();
+        if (newLogs.length > 0) {
+            logCursor[selectedCarId] = newLogs[newLogs.length - 1].timestamp;
+        }
+        renderLogs();
+    } catch (e) {
+        console.error("log fetch failed", e);
     }
 }
 
-startPolling();
-fetchHostInfo();
+function renderLogs() {
+    const out = byId("log-output");
+    const logs = logStore[selectedCarId] || [];
+    if (logs.length === 0) {
+        out.textContent = "No logs yet.";
+        return;
+    }
+
+    out.textContent = logs
+        .map((e) => {
+            const ts = new Date((e.timestamp || 0) * 1000).toISOString();
+            return `[${ts}] [${(e.level || "INFO").toUpperCase()}] ${e.message || ""}`;
+        })
+        .join("\n");
+    out.scrollTop = out.scrollHeight;
+}
+
+function startLogPolling() {
+    stopLogPolling();
+    fetchLogs();
+    logTimer = setInterval(fetchLogs, 1200);
+}
+
+function stopLogPolling() {
+    if (logTimer) {
+        clearInterval(logTimer);
+        logTimer = null;
+    }
+}
+
+async function clearLogs() {
+    if (!selectedCarId) return;
+    await fetch(`/api/cars/${selectedCarId}/logs`, { method: "DELETE" });
+    logStore[selectedCarId] = [];
+    logCursor[selectedCarId] = 0;
+    renderLogs();
+}
+
+function saveLogs() {
+    if (!selectedCarId) return;
+    const text = (logStore[selectedCarId] || [])
+        .map((e) => {
+            const ts = new Date((e.timestamp || 0) * 1000).toISOString();
+            return `[${ts}] [${(e.level || "INFO").toUpperCase()}] ${e.message || ""}`;
+        })
+        .join("\n");
+
+    const blob = new Blob([text], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `car_${selectedCarId}_logs.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
+function updateCharts() {
+    const canvas = byId("statusChart");
+    if (!canvas) return;
+
+    const online = cars.filter((c) => c.status === "online").length;
+    const stopped = cars.filter((c) => c.status === "stopped").length;
+    const offline = cars.length - online - stopped;
+
+    if (!statusChart) {
+        statusChart = new Chart(canvas.getContext("2d"), {
+            type: "doughnut",
+            data: {
+                labels: ["Running", "Stopped", "Offline"],
+                datasets: [{
+                    data: [online, stopped, offline],
+                    backgroundColor: ["#3ecf8e", "#f4bf4f", "#f25f5c"]
+                }]
+            },
+            options: {
+                plugins: {
+                    legend: {
+                        labels: { color: "#e9f4f8" }
+                    }
+                }
+            }
+        });
+        return;
+    }
+
+    statusChart.data.datasets[0].data = [online, stopped, offline];
+    statusChart.update();
+}
+
+function saveGlobalSettings() {
+    const next = Number(byId("setting-poll").value || 2000);
+    pollMs = Math.max(500, next);
+    startPolling();
+}
+
+function wireUiActions() {
+    byId("add-test-client-btn").addEventListener("click", addTestClient);
+    byId("remove-car-btn").addEventListener("click", deleteCar);
+
+    document.querySelectorAll("button[data-control]").forEach((btn) => {
+        btn.addEventListener("click", () => controlAction(btn.dataset.control));
+    });
+
+    byId("save-tuning-btn").addEventListener("click", updateSettings);
+    byId("upload-model-btn").addEventListener("click", uploadDeployModel);
+    byId("deploy-model-btn").addEventListener("click", deployControlModel);
+
+    byId("deploy-exp").addEventListener("change", refreshExperimentDescription);
+    byId("deploy-backbone").addEventListener("change", () => {
+        const isCustom = byId("deploy-backbone").value === "custom";
+        byId("deploy-custom-wrap").classList.toggle("hidden", !isCustom);
+    });
+
+    byId("trt-upload-btn").addEventListener("click", uploadJetsonOptimizeModel);
+    byId("run-trt-btn").addEventListener("click", runTensorRtOptimize);
+    byId("rknn-upload-btn").addEventListener("click", uploadRockchipOptimizeModel);
+    byId("run-rknn-btn").addEventListener("click", runRknnOptimize);
+
+    byId("video-start-btn").addEventListener("click", startVideoStream);
+    byId("video-stop-btn").addEventListener("click", stopVideoStream);
+
+    byId("clear-logs-btn").addEventListener("click", clearLogs);
+    byId("save-logs-btn").addEventListener("click", saveLogs);
+
+    byId("save-global-settings-btn").addEventListener("click", saveGlobalSettings);
+}
+
+async function init() {
+    setupTopTabs();
+    setupClientTabs();
+    setupOptimizeTabs();
+    wireUiActions();
+
+    await fetchHostInfo();
+    await fetchExperiments();
+    startPolling();
+}
+
+window.addEventListener("load", init);
