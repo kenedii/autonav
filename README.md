@@ -1,4 +1,4 @@
-# Jetson Nano Racer – Autonomous RC Car with RealSense D435i
+# AutoNav – AI Autonomous RC Car End-to-End Pipeline for NVIDIA Jetson Nano or Rockchip NPU Devices
 
 This project presents an end-to-end pipeline for data collection, model training, and model inference for a deep learning self-driving lane-following model.
 
