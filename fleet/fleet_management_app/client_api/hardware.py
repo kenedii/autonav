@@ -1,10 +1,15 @@
 import cv2
 import numpy as np
 import time
-from smbus2 import SMBus
 import sys
 import platform
 import subprocess
+import os
+
+try:
+    import serial
+except ImportError:
+    serial = None
 
 # Try importing pyrealsense2, handle if missing
 try:
@@ -13,37 +18,46 @@ try:
 except ImportError:
     HAS_REALSENSE = False
 
-class PCA9685:
-    def __init__(self, bus=1, address=0x40):
-        self.bus = SMBus(bus)
-        self.address = address
-        self.set_pwm_freq(50)
+class PicoSerialController:
+    """Send steering/throttle PWM pulse widths to a Raspberry Pi Pico over serial."""
 
-    def set_pwm_freq(self, freq_hz=50):
-        prescaleval = 25000000.0
-        prescaleval /= 4096.0
-        prescaleval /= float(freq_hz)
-        prescaleval -= 1.0
-        prescale = int(prescaleval + 0.5)
+    def __init__(self, port=None, baudrate=115200, timeout=0.2):
+        if serial is None:
+            raise RuntimeError("pyserial is required for Pico serial control")
 
-        oldmode = self.bus.read_byte_data(self.address, 0x00)
-        newmode = (oldmode & 0x7F) | 0x10                    # sleep
-        self.bus.write_byte_data(self.address, 0x00, newmode)  # go to sleep
-        self.bus.write_byte_data(self.address, 0xFE, prescale)  # set prescale
-        self.bus.write_byte_data(self.address, 0x00, oldmode)   # restore
-        time.sleep(0.005)
-        self.bus.write_byte_data(self.address, 0x00, oldmode | 0x80)  # restart
+        self.port = port or os.getenv("PICO_SERIAL_PORT", "/dev/ttyACM0")
+        self.baudrate = int(os.getenv("PICO_SERIAL_BAUD", str(baudrate)))
+        self.timeout = timeout
 
-    def set_pwm(self, channel, on, off):
-        self.bus.write_byte_data(self.address, 0x06 + 4*channel, on & 0xFF)
-        self.bus.write_byte_data(self.address, 0x07 + 4*channel, on >> 8)
-        self.bus.write_byte_data(self.address, 0x08 + 4*channel, off & 0xFF)
-        self.bus.write_byte_data(self.address, 0x09 + 4*channel, off >> 8)
+        self.ser = serial.Serial(
+            self.port,
+            self.baudrate,
+            timeout=self.timeout,
+            write_timeout=self.timeout,
+        )
+
+        # Let USB CDC settle on connect and set a neutral state.
+        time.sleep(1.0)
+        self.set_us(0, 1500)
+        self.set_us(1, 1500)
+
+    def _send_line(self, cmd):
+        self.ser.write((cmd + "\n").encode("ascii"))
+        self.ser.flush()
 
     def set_us(self, channel, microseconds):
-        """Convert microseconds -> correct 12-bit off value at 50Hz"""
-        pulse = int(microseconds * 4096 * 50 / 1000000 + 0.5)
-        self.set_pwm(channel, 0, pulse)
+        us = int(max(500, min(2500, microseconds)))
+        self._send_line(f"SET {int(channel)} {us}")
+
+    def close(self):
+        try:
+            if getattr(self, "ser", None) and self.ser.is_open:
+                self.ser.close()
+        except Exception:
+            pass
+
+    def __del__(self):
+        self.close()
 
 def get_cpu_ram_info():
     try:

@@ -14,6 +14,12 @@ Each car runs `client_api/main.py` as an on-car service. The host connects to ea
 - settings updates (throttle mode, fixed throttle)
 - remote optimization/deployment flows
 
+Control path on the car side:
+
+- Rockchip/Jetson runtime performs inference.
+- Client API forwards steering/throttle pulse-width targets over serial/USB to a Raspberry Pi Pico.
+- Pico firmware generates hardware PWM and drives the L298N module, which controls the two DC motors.
+
 ## 1) Setup the client on each car (Jetson)
 
 1. Copy the `client_api/` folder to the Jetson.

@@ -1,10 +1,8 @@
 # run_autonomous_resnet.py
 # Fully working autonomous drive script to run the resnet model for Jetson Nano + RealSense + LaTrax
-# Uses TensorRT and correct PCA9685 control to move the car.
+# Uses TensorRT and sends control commands over serial to a Raspberry Pi Pico.
 # Will automatically default to using PyTorch to run the model if TensorRT can't be used.
 # Adjust MODEL_TRT_PATH or MODEL_PYTORCH_PATH if needed.
-# If it does not work, run sudo bash -c 'i2cset -y 1 0x40 0x00 0x21; i2cset -y 1 0x40 0xFE 0x65; i2cset -y 1 0x40 0x00 0xA1; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x09 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 1; i2cset -y 1 0x40 0x0C 0x00 0x09 && sleep 4; i2cset -y 1 0x40 0x0C 0x00 0x06; echo "FINISHED"'
-# first to warm-up PCA9685
 #!/usr/bin/env python3
 
 import os
@@ -17,7 +15,11 @@ import time
 import signal
 import argparse
 import atexit
-from smbus2 import SMBus
+
+try:
+    import serial
+except ImportError:
+    serial = None
 
 import realsense_full
 
@@ -38,6 +40,8 @@ parser.add_argument(
 
 parser.add_argument("--device", type=int, default=0)
 parser.add_argument("--throttle", default="0.3")
+parser.add_argument("--serial-port", default="/dev/ttyACM0")
+parser.add_argument("--serial-baud", type=int, default=115200)
 
 args = parser.parse_args()
 
@@ -47,7 +51,7 @@ IMG_WIDTH = 160
 IMG_HEIGHT = 120
 
 
-# ================= PCA9685 =================
+# ================= PICO SERIAL CONTROL =================
 
 STEERING_CHANNEL = 0
 THROTTLE_CHANNEL = 1
@@ -59,44 +63,35 @@ STEERING_RANGE = 500
 THROTTLE_RANGE = 500
 
 
-class PCA9685:
+class PicoSerialController:
 
-    def __init__(self, bus=1, address=0x40):
+    def __init__(self, port, baudrate):
+        if serial is None:
+            raise RuntimeError("pyserial is required for Pico serial control")
 
-        self.bus = SMBus(bus)
-        self.address = address
-        self.set_pwm_freq(50)
-
-    def set_pwm_freq(self, freq):
-
-        prescale = int(25000000 / 4096 / freq - 1)
-
-        old_mode = self.bus.read_byte_data(self.address, 0x00)
-        sleep = (old_mode & 0x7F) | 0x10
-
-        self.bus.write_byte_data(self.address, 0x00, sleep)
-        self.bus.write_byte_data(self.address, 0xFE, prescale)
-        self.bus.write_byte_data(self.address, 0x00, old_mode)
-
-        time.sleep(0.005)
-
-        self.bus.write_byte_data(self.address, 0x00, old_mode | 0xA1)
+        self.ser = serial.Serial(
+            port,
+            baudrate,
+            timeout=0.2,
+            write_timeout=0.2,
+        )
+        # Let USB CDC settle before the first command.
+        time.sleep(1.0)
 
     def set_us(self, channel, us):
-
         us = int(max(500, min(2500, us)))
+        self.ser.write(f"SET {int(channel)} {us}\n".encode("ascii"))
+        self.ser.flush()
 
-        pulse = int(us * 4096 * 50 / 1000000)
-
-        base = 0x06 + 4 * channel
-
-        self.bus.write_byte_data(self.address, base + 0, 0)
-        self.bus.write_byte_data(self.address, base + 1, 0)
-        self.bus.write_byte_data(self.address, base + 2, pulse & 0xFF)
-        self.bus.write_byte_data(self.address, base + 3, pulse >> 8)
+    def close(self):
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.close()
+        except Exception:
+            pass
 
 
-pca = PCA9685()
+motor_controller = PicoSerialController(args.serial_port, args.serial_baud)
 
 
 # ================= MODEL =================
@@ -209,8 +204,9 @@ def preprocess(frame):
 def cleanup():
 
     try:
-        pca.set_us(STEERING_CHANNEL,STEERING_CENTER)
-        pca.set_us(THROTTLE_CHANNEL,THROTTLE_CENTER)
+        motor_controller.set_us(STEERING_CHANNEL,STEERING_CENTER)
+        motor_controller.set_us(THROTTLE_CHANNEL,THROTTLE_CENTER)
+        motor_controller.close()
     except:
         pass
 
@@ -239,8 +235,8 @@ print("Arming ESC...")
 
 for _ in range(20):
 
-    pca.set_us(STEERING_CHANNEL,STEERING_CENTER)
-    pca.set_us(THROTTLE_CHANNEL,THROTTLE_CENTER)
+    motor_controller.set_us(STEERING_CHANNEL,STEERING_CENTER)
+    motor_controller.set_us(THROTTLE_CHANNEL,THROTTLE_CENTER)
 
     time.sleep(0.05)
 
@@ -278,8 +274,8 @@ while True:
     steer_us = int(STEERING_CENTER + steer*STEERING_RANGE)
     throttle_us = int(THROTTLE_CENTER + throttle*THROTTLE_RANGE)
 
-    pca.set_us(STEERING_CHANNEL,steer_us)
-    pca.set_us(THROTTLE_CHANNEL,throttle_us)
+    motor_controller.set_us(STEERING_CHANNEL,steer_us)
+    motor_controller.set_us(THROTTLE_CHANNEL,throttle_us)
 
     count+=1
     now=time.time()

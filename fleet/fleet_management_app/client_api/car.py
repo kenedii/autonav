@@ -7,11 +7,11 @@ import math
 from typing import List, Dict, Any
 
 try:
-    from .hardware import PCA9685, get_camera, get_system_specs
+    from .hardware import PicoSerialController, get_camera, get_system_specs
     from .models import AutonomousDriver, ObjectDetector
     from .slam import VisualSlamSystem
 except ImportError:
-    from hardware import PCA9685, get_camera, get_system_specs
+    from hardware import PicoSerialController, get_camera, get_system_specs
     from models import AutonomousDriver, ObjectDetector
     from slam import VisualSlamSystem
 
@@ -38,7 +38,7 @@ class CarClient:
             logger.warning(f"Failed to get system specs: {e}")
 
         self.camera = None
-        self.pca = None
+        self.motor_controller = None
         self.control_model = None
         self.detection_model = None
         self.slam = None
@@ -138,13 +138,13 @@ class CarClient:
             
             # Setup Hardware
             try:
-                if self.pca is None:
-                    self.pca = PCA9685()
-                self.pca.set_us(self.STEERING_CHANNEL, self.STEERING_CENTER)
-                self.pca.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
+                if self.motor_controller is None:
+                    self.motor_controller = PicoSerialController()
+                self.motor_controller.set_us(self.STEERING_CHANNEL, self.STEERING_CENTER)
+                self.motor_controller.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
             except Exception as e:
-                logger.error(f"Failed to init PCA9685 (Mocking): {e}")
-                self.pca = None 
+                logger.error(f"Failed to init Pico serial motor controller (Mocking): {e}")
+                self.motor_controller = None 
                 
             try:
                 # Setup Camera (first only)
@@ -200,9 +200,11 @@ class CarClient:
             self.thread.join(timeout=2.0)
         
         # Safe stop
-        if self.pca:
-            self.pca.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
-            self.pca.set_us(self.STEERING_CHANNEL, self.STEERING_CENTER)
+        if self.motor_controller:
+            self.motor_controller.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
+            self.motor_controller.set_us(self.STEERING_CHANNEL, self.STEERING_CENTER)
+            self.motor_controller.close()
+            self.motor_controller = None
             
         if self.camera:
             self.camera.release()
@@ -211,8 +213,8 @@ class CarClient:
     def pause(self, duration=None):
         """Pause execution. If duration is set, auto-resume after seconds."""
         self.paused = True
-        if self.pca:
-            self.pca.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
+        if self.motor_controller:
+            self.motor_controller.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
         
         if duration:
             self.pause_until = time.time() + duration
@@ -231,7 +233,7 @@ class CarClient:
         last_time = time.time()
         
         # Arm ESC
-        if self.pca:
+        if self.motor_controller:
              time.sleep(1.0)
         
         throttle_us = self.THROTTLE_CENTER + int(self.fixed_throttle * (self.THROTTLE_MAX - self.THROTTLE_CENTER))
@@ -324,9 +326,9 @@ class CarClient:
                     # Calculate throttle pulse
                     throttle_us = self.THROTTLE_CENTER + int(current_throttle * (self.THROTTLE_MAX - self.THROTTLE_CENTER))
                     
-                    if self.pca:
-                        self.pca.set_us(self.STEERING_CHANNEL, pulse)
-                        self.pca.set_us(self.THROTTLE_CHANNEL, throttle_us)
+                    if self.motor_controller:
+                        self.motor_controller.set_us(self.STEERING_CHANNEL, pulse)
+                        self.motor_controller.set_us(self.THROTTLE_CHANNEL, throttle_us)
                         
                     self.state["last_action"] = {"steer": steer_norm, "throttle": current_throttle}
                     
