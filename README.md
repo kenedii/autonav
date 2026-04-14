@@ -1,15 +1,41 @@
 # Jetson Nano Racer – Autonomous RC Car with RealSense D435i
 
-This project deploys a deep learning lane-following model on an
-**NVIDIA Jetson Nano** mounted on a **LaTrax 1/18 RC car**. CAM0 is the
-primary forward RGB source for lane following and AprilTags, while the
-**Intel RealSense D435i** remains active as a sidecar for depth-stop and
-IMU context. CAM1 is reserved for rear-preview / reverse-only scaffolding.
-Steering commands are sent to the PCA9685 servo driver in real time.
+This project presents an end-to-end pipeline for data collection, model training, and model inference for a deep learning self-driving lane-following model.
+
+It allows you to take a Single Board Computer with CUDA cores or a Rockchip NPU, a camera, and a RC Car, and:
+- Collect Data by driving the car around a track made of tape or another material.
+- Use a Data Management Frontend to clean your data and generate augmented images.
+- Train a model to predict steering and/or throttle values
+  - Resnet CNN Backbone to extract features from RGB images
+  - MLP Regressor to predict normalized steering and/or throttle values from extracted features
+- Run the model and watch the car autonomously drive around your track
+- Use the Fleet Management Frontend to remotely start/stop vehicle, load new models, camera live view, and view logs.
+
+The pipeline has been optimized for a **NVIDIA Jetson Nano** mounted on a **LaTrax 1/18 RC car** using CUDA inference, or a **Raxda Rock 5B** with a generic toy RC car using RKNN inference. 
+
+## Top-level layout
+
+- `tests/`: Hardware checks and test scripts.
+- `setup/`: Jetson setup and build scripts, including bundled RealSense artifacts.
+- `inference/`: Model optimization and on-car autonomous runtime scripts.
+- `data_collection/`: Data recording, dataset management frontend, and augmentation utilities.
+- `model_training/`: Model training code for both legacy RGB-only and new sensor-combination workflows.
+- `fleet/`: Fleet-facing client + host application code.
+
+## Quick start path
+
+1. Start with setup docs in `setup/README.md`.
+2. Verify controls and hardware using scripts in `tests/README.md`.
+3. Collect data and interact with Data Management Frontend using `data_collection/README.md`.
+4. Train models from `model_training/README.md`.
+5. Optimize/deploy with `inference/README.md`.
+6. Run fleet workflows, manage cars from Fleet Management Frontend with `fleet/fleet_management_app/README.md`.
+
 
 ## Hardware
 
-- Jetson Nano 4GB Developer Kit with ARM Cortex-A57 CPU, Ubuntu + JetPack
+**Jetson Nano Prototype (Sensor-Fusion with Depth, IR, and 360 degree FOV)**
+- Jetson Nano 4GB Developer Kit with ARM Cortex-A57 CPU and Fan-4020-PWM-5V, Ubuntu + JetPack
 - LaTrax Rally 1/18 RC car
 - Intel RealSense D435i (sidecar depth + IMU)
 - Front CAM0 fisheye camera for primary forward RGB
@@ -17,19 +43,31 @@ Steering commands are sent to the PCA9685 servo driver in real time.
 - TP-Link TL-WN725N USB WiFi adapter
 - PCA9685 16-channel servo driver
 - Pololu 4-Channel RC Servo Multiplexer
-- Fan-4020-PWM-5V
-- XBOX Controller
 - Batteries, mounts, cabling
+
+After model inference, the Jetson Nano outputs steering-angle and throttle predictions. It sends these values over I²C to the PCA9685 servo driver (configured at 50 Hz), which converts them into standard RC PWM pulses (pulse-width in microseconds). The PCA9685 then feeds the PWM signals through the Pololu 4-channel RC servo multiplexer directly to the LaTrax car’s steering servo and electronic speed controller (ESC)
+
+**Radxa Rockchip 5B Prototype (Budget Model, Cheapest Proof-Of-Concept)**
+- Radxa Rock 5B with Rockchip RK3588 SoC and Radxa Heatsink 4012, Rock 5B Armbian
+- Raspberry Pi Pico
+- Generic $10 Toy RC Car (WalMart)
+- L298N motor driver module
+- Generic $5 USB Webcam
+- Batteries, mounts, cabling
+
+The Rock 5B runs the same inference model and sends the resulting steering/throttle commands (desired PWM pulse widths or motor speeds) over serial/USB to the Raspberry Pi Pico. The Pico then generates precise PWM signals in hardware and drives the L298N motor-driver module, which controls direction and speed of the two DC motors in the toy RC car.
+
+Needed for data collection:
+- XBOX Controller
+To collect data by manually driving the car around the track, you must have a game controller. We configured it to use a $5 USB XBOX Controller, however other controllers may work.
+
+CAM0 is the primary forward RGB source for lane following, while the **Intel RealSense D435i** remains active as a sidecar for depth-stop and IMU context. CAM1 is reserved for rear-preview / reverse-only scaffolding. Steering commands are sent to the PCA9685 servo driver in real time.
 
 ## Software
 
 - Ubuntu 18.04.6 LTS
 - Jetpack 4.6.1 SDK
 - Python 3.6.9
-
-## Model Architecture
-
-- Supports several Resnet variants: ```Resnet18, Resnet34, Resnet50, Resnet101```
 
 ## Core Features
 
@@ -42,93 +80,29 @@ Steering commands are sent to the PCA9685 servo driver in real time.
 - Host dashboard for fleet/operator monitoring
 - Dockerfile support for deployment workflows
 
-## Expo Demo Mode / AutoNav Slice
+## Model Architecture
 
-This repository also supports an expo-ready AutoNav slice layered on top of the existing lane follower.
+- Supports several Resnet variants: ```Resnet18, Resnet34, Resnet50, Resnet101, Resnet152```
 
-- Default route name: `expo_route`
-- Default checkpoint tags: `start/home = 10`, `checkpoint = 20`, `goal = 30`
-- Ordered behavior: the route starts in `RUNNING`, tag `20` marks checkpoint progress, and tag `30` only counts after the checkpoint has been seen
-- Depth-based obstacle stop is independent of YOLO and uses the RealSense front ROI
-- Obstacle stops require a manual operator restart for safety
-- SLAM is not required for demo mode
-- If AprilTag support is unavailable at runtime, the car keeps lane following and reports tag detection as unavailable
-- CAM0 is the forward preview and primary training source in the recommended configuration
-- CAM1 does not participate in ordinary forward control
-- Legacy single-camera configs still work; role-based camera configs are preferred for new runs
-- The CAM0 training/inference profile is `cam0_fisheye_v1`; older RealSense RGB runs remain on the legacy resize path
-
-Recommended camera config shape:
-
-```json
-[
-  {
-    "role": "primary_rgb",
-    "type": "csi",
-    "sensor_id": 0,
-    "width": 640,
-    "height": 480,
-    "fps": 15,
-    "flip_method": 2,
-    "enabled": true
-  },
-  {
-    "role": "sidecar_depth_imu",
-    "type": "realsense",
-    "width": 640,
-    "height": 480,
-    "fps": 15,
-    "enabled": true
-  },
-  {
-    "role": "rear_preview",
-    "type": "csi",
-    "sensor_id": 1,
-    "width": 640,
-    "height": 480,
-    "fps": 15,
-    "flip_method": 2,
-    "enabled": false
-  }
+The project defines multiple model variants through a list called EXPERIMENTS. This allows easy training and evaluation of different sensor combinations without changing the core training code.
+``` EXPERIMENTS = [
+    {"id": 1, "desc": "Front+Back + all sensors", "csv": AUGMENTED_CSV, "features": ['rgb_path', 'cam1_path', 'ir_path', 'depth_path']},
+    {"id": 2, "desc": "Front only + all sensors", "csv": AUGMENTED_CSV, "features": ['rgb_path', 'ir_path', 'depth_path']},
+    {"id": 3, "desc": "Front only RGB only",     "csv": AUGMENTED_CSV, "features": ['rgb_path']},
+    {"id": 4, "desc": "Front+Back RGB only",      "csv": AUGMENTED_CSV, "features": ['rgb_path', 'cam1_path']},
+    {"id": 5, "desc": "Front+Back + all sensors (Cleaned)",   "csv": CLEANED_CSV,   "features": ['rgb_path', 'cam1_path', 'ir_path', 'depth_path']},
+    {"id": 6, "desc": "Front+Back RGB only (Cleaned)",        "csv": CLEANED_CSV,   "features": ['rgb_path', 'cam1_path']}
 ]
 ```
+Experiment 5 and 6 are identical to 1 and 2 respectively, these were just created these to do a training run with non-augmented images only, so they can be ignored. (Using no augmented images performs much worse)
 
-Example Jetson smoke-test config:
+rgb_path: Front camera on vehicle
+cam1_path: Back camera on vehicle
+IR_path: File path of IR image from Realsense Camera
+Depth_path: File path of Depth map image from Realsense Camera
 
-- [docs/examples/client_config_cam0_primary.json](docs/examples/client_config_cam0_primary.json)
 
-Jetson smoke-test checklist:
-
-- [docs/jetson_smoke_test.md](docs/jetson_smoke_test.md)
-
-## Jetson Smoke-Test Validation
-
-Use the checked-in CAM0-primary example config and the smoke-test checklist when validating the split on real hardware.
-
-1. Start the host dashboard and Jetson client using the standard existing entrypoints.
-2. Apply [docs/examples/client_config_cam0_primary.json](docs/examples/client_config_cam0_primary.json) to confirm CAM0 is primary RGB, RealSense is sidecar depth/IMU, and CAM1 is rear-only scaffolding.
-3. Verify `/status` and the dashboard show:
-   - `CAM0 Forward Preview`
-   - primary RGB health
-   - sidecar depth/IMU health
-   - rear preview disabled or unavailable
-   - explicit `tag_detector_status`, `control_model_status`, `depth_status`, and `stop_reason`
-4. Use [docs/jetson_smoke_test.md](docs/jetson_smoke_test.md) for the full checklist, including missing-CAM0 and missing-depth fallback checks.
-
-## Development Workflow
-
-Use Git as the source of truth for source changes and treat the Jetson as a
-deployment target that pulls tested code from Git. The workflow reference lives
-in [docs/git_workflow.md](docs/git_workflow.md).
-
-## 1. Setup
-
-### 1.1 Jetson Base Setup
-
-1. Flash JetPack and boot Nano.
-2. Install system packages:
-   ```bash
-   sudo apt-get update
-   sudo apt-get install python3-pip git
+## Troubleshooting
 
 If the car is not moving when model is running, run ```sudo bash -c 'i2cset -y 1 0x40 0x00 0x21; i2cset -y 1 0x40 0xFE 0x65; i2cset -y 1 0x40 0x00 0xA1; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x09 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 1; i2cset -y 1 0x40 0x0C 0x00 0x09 && sleep 4; i2cset -y 1 0x40 0x0C 0x00 0x06; echo "FINISHED"'``` (directly writes raw register values via I2C to wake up the PCA9685, set it to 50 Hz, sweep the steering servo fully left → right → center, slam the throttle channel to full forward for 4 seconds, then return everything to neutral)
+This worked to "warm up" the PCA9685 so the model inference code could run properly.
