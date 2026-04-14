@@ -10,7 +10,7 @@ from PIL import Image
 import sys
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(CURRENT_DIR)))
+REPO_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
 if REPO_ROOT not in sys.path:
     sys.path.append(REPO_ROOT)
 
