@@ -52,6 +52,7 @@ After model inference, the Jetson Nano outputs steering-angle and throttle predi
 - Raspberry Pi Pico
 - Generic $10 Toy RC Car (WalMart)
 - L298N motor driver module
+- TP-Link TL-WN725N USB WiFi adapter
 - Generic $5 USB Webcam
 - Batteries, mounts, cabling
 
