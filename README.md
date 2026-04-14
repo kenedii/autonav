@@ -96,10 +96,10 @@ The project defines multiple model variants through a list called EXPERIMENTS. T
 ```
 Experiment 5 and 6 are identical to 1 and 2 respectively, these were just created these to do a training run with non-augmented images only, so they can be ignored. (Using no augmented images performs much worse)
 
--rgb_path: Front camera on vehicle
--cam1_path: Back camera on vehicle
--IR_path: File path of IR image from Realsense Camera
--Depth_path: File path of Depth map image from Realsense Camera
+- rgb_path: Front camera on vehicle
+- cam1_path: Back camera on vehicle
+- IR_path: File path of IR image from Realsense Camera
+- Depth_path: File path of Depth map image from Realsense Camera
 
 
 ## Troubleshooting
