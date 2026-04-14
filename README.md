@@ -2,7 +2,7 @@
 
 This project presents an end-to-end pipeline for data collection, model training, and model inference for a deep learning self-driving lane-following model.
 
-It allows you to take a Single Board Computer with CUDA cores or a NPU, a camera, and a RC Car, and:
+It allows you to take a Single Board Computer with CUDA cores or a Rockchip NPU, a camera, and a RC Car, and:
 - Collect Data by driving the car around a track made of tape or another material.
 - Use a Data Management Frontend to clean your data and generate augmented images.
 - Train a model to predict steering and/or throttle values
