@@ -3,313 +3,326 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JetRacer Host Manager</title>
+    <title>Fleet Management Frontend</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
-    <!-- Chart.js for Analytics -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-
-    <!-- Header / Tabs -->
-    <header>
-        <div class="logo-group">
-            <div class="logo">🏎️ JetRacer Host</div>
-            <div class="host-ip-display" id="host-ip-info">Host IP: ...</div>
+    <header class="app-header">
+        <div>
+            <h1>Autonomous Fleet Management</h1>
+            <p id="host-ip-info">Server IP: ...</p>
         </div>
         <nav>
-            <button class="tab-btn active" onclick="openTab('home')">Home</button>
-            <button class="tab-btn" onclick="openTab('fleet')">Fleet</button>
-            <button class="tab-btn" onclick="openTab('analytics')">Analytics</button>
-            <button class="tab-btn" onclick="openTab('settings')">Settings</button>
+            <button class="tab-btn active" data-tab="home">Home</button>
+            <button class="tab-btn" data-tab="fleet">Fleet</button>
+            <button class="tab-btn" data-tab="analytics">Analytics</button>
+            <button class="tab-btn" data-tab="settings">Settings</button>
         </nav>
     </header>
 
-    <!-- Main Content -->
     <main>
-        
-        <!-- HOME TAB -->
         <section id="home" class="tab-content active">
             <div class="hero">
-                <h1>Welcome to Autonomous Fleet Manager</h1>
-                <p>Monitor, Configure, and Deploy your autonomous vehicles.</p>
-                <div class="stats-cards">
-                    <div class="card">
-                        <h3>Active Cars</h3>
+                <h2>Deploy, tune, and optimize control models by device</h2>
+                <p>Model deployment and hardware optimization now mirror experiment layouts from autonomous inference scripts.</p>
+                <div class="stats-grid">
+                    <article class="stat-card">
+                        <h3>Running Cars</h3>
                         <span id="stat-active">0</span>
-                    </div>
-                    <div class="card">
-                        <h3>Total Fleet</h3>
+                    </article>
+                    <article class="stat-card">
+                        <h3>Total Cars</h3>
                         <span id="stat-total">0</span>
-                    </div>
+                    </article>
                 </div>
             </div>
         </section>
 
-        <!-- FLEET TAB -->
         <section id="fleet" class="tab-content">
-            <div class="fleet-container">
-                
-                <!-- Left: Fleet List -->
-                <div class="fleet-list-panel">
-                    <div class="panel-header">
-                        <h2>Fleet List</h2>
-                        <button class="btn-primary" onclick="addTestClient()">+ Add Test Client</button>
+            <div class="fleet-layout">
+                <aside class="fleet-list-panel">
+                    <div class="panel-row">
+                        <h2>Fleet</h2>
+                        <button class="btn-primary" id="add-test-client-btn">+ Test Client</button>
                     </div>
-                    <ul id="car-list" class="car-list">
-                        <!-- Populated by JS -->
-                    </ul>
-                </div>
+                    <ul id="car-list" class="car-list"></ul>
+                </aside>
 
-                <!-- Right: Fleet Details -->
-                <div class="fleet-detail-panel" id="detail-panel">
-                    <div class="empty-state">Select a car to view details</div>
-                    
-                    <div id="car-detail-content" style="display:none;">
+                <section class="fleet-detail-panel" id="detail-panel">
+                    <div class="empty-state" id="empty-state">Select a car from the fleet list.</div>
+
+                    <div id="car-detail-content" class="detail-content hidden">
                         <div class="detail-header">
-                            <h2 id="detail-name">Car Name</h2>
-                            <span class="status-pill" id="detail-status">Online</span>
-                            <button class="btn-danger-outline" onclick="deleteCar()">Remove</button>
+                            <div>
+                                <h2 id="detail-name">Car</h2>
+                                <p id="detail-ip">0.0.0.0:8000</p>
+                            </div>
+                            <div class="detail-actions">
+                                <span id="detail-status" class="status-pill">UNKNOWN</span>
+                                <button class="btn-danger-outline" id="remove-car-btn">Remove</button>
+                            </div>
                         </div>
-                        
+
                         <div class="client-tabs-nav">
-                            <button class="client-tab-btn active" onclick="openClientTab('overview')">Overview</button>
-                            <button class="client-tab-btn" onclick="openClientTab('specs')">Specs</button>
-                            <button class="client-tab-btn" onclick="openClientTab('video')">📷 Live Feed</button>
-                            <button class="client-tab-btn" onclick="openClientTab('logs')">📋 Logs</button>
+                            <button class="client-tab-btn active" data-client-tab="overview">Overview</button>
+                            <button class="client-tab-btn" data-client-tab="deploy">Control Model</button>
+                            <button class="client-tab-btn" data-client-tab="optimize">Optimize Model</button>
+                            <button class="client-tab-btn" data-client-tab="video">Live Feed</button>
+                            <button class="client-tab-btn" data-client-tab="logs">Logs</button>
                         </div>
 
                         <div id="client-tab-overview" class="client-tab-pane active">
-                            <div class="detail-info">
-                                <p><strong>IP Address:</strong> <span id="detail-ip"></span></p>
-                                <p><strong>Location:</strong> <span id="detail-geo"></span></p>
-                                <p><strong>Activity:</strong> <span id="detail-activity">Idle</span></p>
-                                <p><strong>FPS:</strong> <span id="detail-fps">0</span></p>
-                                <div id="imu-info" style="margin-top:5px; font-size:0.9em; color:#bbb;">
-                                    <p><strong>IMU Accel:</strong> <span id="imu-accel">N/A</span></p>
-                                    <p><strong>IMU Gyro:</strong> <span id="imu-gyro">N/A</span></p>
+                            <div class="grid-two">
+                                <div class="panel-card">
+                                    <h3>Vehicle Runtime</h3>
+                                    <p><strong>Location:</strong> <span id="detail-geo">Unknown</span></p>
+                                    <p><strong>Activity:</strong> <span id="detail-activity">Idle</span></p>
+                                    <p><strong>FPS:</strong> <span id="detail-fps">0</span></p>
+                                    <p><strong>Inference:</strong> <span id="spec-inference">Unknown</span></p>
                                 </div>
-                            </div>
-    
-                            <div class="control-group">
-                                <h3>Live Controls</h3>
-                                <div class="btn-row">
-                                    <button class="btn-success" onclick="controlAction('start')">START</button>
-                                    <button class="btn-warning" onclick="controlAction('pause')">PAUSE</button>
-                                    <button class="btn-danger" onclick="controlAction('stop')">STOP</button>
-                                    <button class="btn-primary" onclick="controlAction('resume')">RESUME</button>
+                                <div class="panel-card">
+                                    <h3>Controls</h3>
+                                    <div class="btn-row">
+                                        <button class="btn-success" data-control="start">Start</button>
+                                        <button class="btn-warning" data-control="pause">Pause</button>
+                                        <button class="btn-danger" data-control="stop">Stop</button>
+                                        <button class="btn-primary" data-control="resume">Resume</button>
+                                    </div>
+                                    <div class="form-row">
+                                        <label for="tune-mode">Throttle Mode</label>
+                                        <select id="tune-mode">
+                                            <option value="fixed">Fixed</option>
+                                            <option value="ai">AI</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-row">
+                                        <label for="tune-throttle">Fixed Throttle</label>
+                                        <input type="number" id="tune-throttle" value="0.22" step="0.01">
+                                    </div>
+                                    <button class="btn-secondary" id="save-tuning-btn">Update Settings</button>
                                 </div>
                             </div>
 
-                            <div class="control-group">
-                                <h3>Tuning</h3>
+                            <div class="panel-card">
+                                <h3>Control Model Loaded</h3>
+                                <div id="loaded-model-info" class="mono-block">No model deployment info yet.</div>
+                            </div>
+                        </div>
+
+                        <div id="client-tab-deploy" class="client-tab-pane">
+                            <div class="panel-card">
+                                <h3>Deploy Control Model</h3>
+                                <p class="subtle">Pick an experiment, choose backbone, map your sensors in plain English, upload the model, then deploy.</p>
+
+                                <div class="grid-two">
+                                    <div>
+                                        <div class="form-row">
+                                            <label for="deploy-exp">Experiment Sensors</label>
+                                            <select id="deploy-exp"></select>
+                                        </div>
+                                        <div id="deploy-exp-description" class="inline-note"></div>
+
+                                        <div class="form-row">
+                                            <label for="deploy-backbone">ResNet Backbone</label>
+                                            <select id="deploy-backbone">
+                                                <option value="resnet34">ResNet-34</option>
+                                                <option value="resnet101" selected>ResNet-101</option>
+                                                <option value="resnet152">ResNet-152</option>
+                                                <option value="custom">Custom</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-row hidden" id="deploy-custom-wrap">
+                                            <label for="deploy-backbone-custom">Custom Backbone</label>
+                                            <input id="deploy-backbone-custom" placeholder="e.g. resnet50 or my_custom_net">
+                                        </div>
+
+                                        <div class="form-row">
+                                            <label for="deploy-model-backend">Control Backend</label>
+                                            <select id="deploy-model-backend">
+                                                <option value="pytorch">PyTorch</option>
+                                                <option value="tensorrt">TensorRT</option>
+                                                <option value="rockchip">Rockchip RKNN</option>
+                                            </select>
+                                        </div>
+
+                                        <div class="form-row">
+                                            <label for="deploy-model-file">Upload Model</label>
+                                            <input id="deploy-model-file" type="file" accept=".pth,.pt,.rknn,.bin,.onnx">
+                                        </div>
+                                        <div class="btn-row">
+                                            <button class="btn-secondary" id="upload-model-btn">Upload Model</button>
+                                            <span id="uploaded-model-label" class="inline-note">No file uploaded</span>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <h4>Car Input Devices</h4>
+                                        <div class="form-row">
+                                            <label for="front-cam-source">Front Camera Driver</label>
+                                            <select id="front-cam-source">
+                                                <option value="opencv">OpenCV</option>
+                                                <option value="realsense">pyrealsense2</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="front-cam-index">Front Camera Index</label>
+                                            <input id="front-cam-index" type="number" value="0">
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="rear-enabled">Use Rear Camera</label>
+                                            <input id="rear-enabled" type="checkbox">
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="rear-cam-source">Rear Camera Driver</label>
+                                            <select id="rear-cam-source">
+                                                <option value="opencv">OpenCV</option>
+                                                <option value="realsense">pyrealsense2</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="rear-cam-index">Rear Camera Index</label>
+                                            <input id="rear-cam-index" type="number" value="1">
+                                        </div>
+                                        <div class="checkbox-row">
+                                            <label><input id="use-depth" type="checkbox" checked> Use RealSense depth as model input</label>
+                                            <label><input id="use-ir" type="checkbox" checked> Use RealSense IR as model input</label>
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <div class="form-row">
-                                    <label>Mode:</label>
-                                    <select id="tune-mode" onchange="updateSettings()">
-                                        <option value="fixed">Fixed Throttle</option>
-                                    <option value="ai">AI Control</option>
-                                </select>
-                            </div>
-                            <div class="form-row">
-                                <label>Throttle:</label>
-                                <input type="number" id="tune-throttle" step="0.01" value="0.22" onchange="updateSettings()">
+                                    <label for="deploy-model-path">Model Path On Car</label>
+                                    <input id="deploy-model-path" readonly>
+                                </div>
+
+                                <button class="btn-primary" id="deploy-model-btn">Deploy Control Model</button>
+                                <pre id="deploy-result" class="mono-block"></pre>
                             </div>
                         </div>
-                        
-                        <div class="control-group">
-                            <h3>System Configuration</h3>
-                            <button class="btn-secondary" onclick="openConfigModal()">Edit Configuration</button>
-                        </div>
 
-                        <div class="control-group">
-                            <h3>Live Detections</h3>
-                            <ul id="detection-list">
-                                <li>No objects detected</li>
-                            </ul>
-                        </div>
+                        <div id="client-tab-optimize" class="client-tab-pane">
+                            <div class="panel-card">
+                                <div class="panel-row">
+                                    <h3>Optimize Model</h3>
+                                    <span id="platform-badge" class="platform-badge">Platform: unknown</span>
+                                </div>
+                                <p class="subtle">TensorRT optimization runs on Jetson cars. RKNN optimization runs on this x86 host for Rockchip deployments.</p>
 
-                        <!-- New Panel for SLAM / Map -->
-                        <div class="control-group">
-                            <h3>Map / SLAM</h3>
-                            <canvas id="slam-map" width="400" height="300" style="border:1px solid #333; background:#000;"></canvas>
-                            <div class="slam-controls">
-                                <p>Click on map to set destination</p>
-                                <button class="btn-danger-outline" onclick="cancelNavigation()">Cancel Nav</button>
-                                <div id="slam-coords">X: 0.0 Y: 0.0 &theta;: 0.0</div>
+                                <div class="opt-tabs">
+                                    <button class="opt-tab-btn active" data-opt-tab="jetson">Jetson TensorRT</button>
+                                    <button class="opt-tab-btn" data-opt-tab="rockchip">Rockchip RKNN (x86)</button>
+                                </div>
+
+                                <div id="opt-tab-jetson" class="opt-pane active">
+                                    <div class="form-row">
+                                        <label for="trt-exp">Experiment</label>
+                                        <select id="trt-exp"></select>
+                                    </div>
+                                    <div class="form-row">
+                                        <label for="trt-arch">Backbone</label>
+                                        <select id="trt-arch">
+                                            <option value="resnet34">ResNet-34</option>
+                                            <option value="resnet101" selected>ResNet-101</option>
+                                            <option value="resnet152">ResNet-152</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-row">
+                                        <label for="trt-model-file">Model File</label>
+                                        <input id="trt-model-file" type="file" accept=".pth,.pt">
+                                    </div>
+                                    <button class="btn-secondary" id="trt-upload-btn">Upload to Car</button>
+                                    <button class="btn-primary" id="run-trt-btn">Run TensorRT Optimization</button>
+                                    <div id="trt-upload-state" class="inline-note">No model uploaded</div>
+                                </div>
+
+                                <div id="opt-tab-rockchip" class="opt-pane">
+                                    <div class="form-row">
+                                        <label for="rknn-exp">Experiment</label>
+                                        <select id="rknn-exp"></select>
+                                    </div>
+                                    <div class="form-row">
+                                        <label for="rknn-arch">Backbone</label>
+                                        <select id="rknn-arch">
+                                            <option value="resnet34" selected>ResNet-34</option>
+                                            <option value="resnet101">ResNet-101</option>
+                                            <option value="resnet152">ResNet-152</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-row">
+                                        <label for="rknn-model-file">Model File</label>
+                                        <input id="rknn-model-file" type="file" accept=".pth,.pt">
+                                    </div>
+                                    <button class="btn-secondary" id="rknn-upload-btn">Upload to Host</button>
+                                    <button class="btn-primary" id="run-rknn-btn">Run RKNN Optimization</button>
+                                    <div id="rknn-upload-state" class="inline-note">No model uploaded</div>
+                                </div>
+
+                                <div class="panel-card soft">
+                                    <h4>Optimized Model Output</h4>
+                                    <pre id="optimize-result" class="mono-block">No optimization run yet.</pre>
+                                    <a id="download-optimized-link" class="btn-success disabled-link" href="#" download>Download Optimized Model</a>
+                                </div>
                             </div>
                         </div>
-                    </div> <!-- End of client-tab-overview -->
 
-                    <div id="client-tab-specs" class="client-tab-pane" style="display:none; padding:1rem;">
-                        <h3>Hardware Specifications</h3>
-                        <table class="specs-table">
-                            <tr><td><strong>Device:</strong></td><td id="spec-device">Loading...</td></tr>
-                            <tr><td><strong>CPU/RAM:</strong></td><td id="spec-cpu">Loading...</td></tr>
-                            <tr><td><strong>Cameras:</strong></td><td id="spec-cameras">Loading...</td></tr>
-                            <tr><td><strong>Inference:</strong></td><td id="spec-inference">Loading...</td></tr>
-                            <tr><td><strong>ResNet Version:</strong></td><td id="spec-resnet">Loading...</td></tr>
-                            <tr><td><strong>YOLO Version:</strong></td><td id="spec-yolo">Loading...</td></tr>
-                        </table>
+                        <div id="client-tab-video" class="client-tab-pane">
+                            <div class="panel-card">
+                                <h3>Live Camera Feed</h3>
+                                <div class="btn-row">
+                                    <select id="camera-select"></select>
+                                    <select id="fps-select">
+                                        <option value="1">1 FPS</option>
+                                        <option value="2">2 FPS</option>
+                                        <option value="5" selected>5 FPS</option>
+                                        <option value="10">10 FPS</option>
+                                    </select>
+                                    <button class="btn-success" id="video-start-btn">Start</button>
+                                    <button class="btn-danger-outline" id="video-stop-btn">Stop</button>
+                                    <span id="video-status">Stopped</span>
+                                </div>
+                                <canvas id="video-canvas" width="640" height="480"></canvas>
+                            </div>
+                        </div>
+
+                        <div id="client-tab-logs" class="client-tab-pane">
+                            <div class="panel-card">
+                                <div class="panel-row">
+                                    <h3>Live Logs</h3>
+                                    <div class="btn-row">
+                                        <button class="btn-secondary" id="clear-logs-btn">Clear</button>
+                                        <button class="btn-primary" id="save-logs-btn">Save</button>
+                                    </div>
+                                </div>
+                                <div id="log-output" class="log-output"></div>
+                            </div>
+                        </div>
                     </div>
-
-                    <!-- Video Feed Tab -->
-                    <div id="client-tab-video" class="client-tab-pane" style="display:none; padding:1rem;">
-                        <h3>Live Camera Feed</h3>
-                        <p style="color:#d9534f; font-size:0.85em; margin-bottom:0.75rem; font-weight:bold;">
-                            Note: Accessing the video feed at high FPS may severely impact the performance of other tasks such as navigation and model inference.
-                        </p>
-                        <div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem;">
-                            <span id="video-status" style="color:#888; font-size:0.9em;">Stopped</span>
-                            <select id="camera-select" style="padding:4px; border-radius:4px; max-width: 150px;">
-                                <option value="0">Camera 0</option>
-                            </select>
-                            <label for="fps-select" style="font-size:0.9em; font-weight:bold;">FPS:</label>
-                            <select id="fps-select" style="padding:4px; border-radius:4px;">
-                                <option value="1">1</option>
-                                <option value="2">2</option>
-                                <option value="5" selected>5</option>
-                                <option value="10">10</option>
-                                <option value="15">15</option>
-                            </select>
-                            <button class="btn-success" onclick="startVideoStream()">▶ Start</button>
-                            <button class="btn-danger-outline" onclick="stopVideoStream()">■ Stop</button>
-                        </div>
-                        <div style="background:#000; display:inline-block; border:1px solid #333; border-radius:6px; overflow:hidden;">
-                            <canvas id="video-canvas" width="640" height="480"
-                                    style="display:block; max-width:100%;"></canvas>
-                        </div>
-                        <p style="color:#666; font-size:0.8em; margin-top:0.5rem;">
-                            Stream is encrypted end-to-end with Fernet AES-128 (derived from the car password).
-                        </p>
-                    </div>
-
-                    <!-- Logs Tab -->
-                    <div id="client-tab-logs" class="client-tab-pane" style="display:none; padding:1rem;">
-                        <div class="log-panel-header">
-                            <h3 style="margin:0;">Live Logs</h3>
-                            <div class="log-toolbar">
-                                <label class="log-filter-label">
-                                    <input type="checkbox" id="log-autoscroll" checked> Auto-scroll
-                                </label>
-                                <select id="log-level-filter" onchange="renderLogs()">
-                                    <option value="ALL">All levels</option>
-                                    <option value="DEBUG">DEBUG+</option>
-                                    <option value="INFO">INFO+</option>
-                                    <option value="WARN">WARN+</option>
-                                    <option value="ERROR">ERROR+</option>
-                                </select>
-                                <button class="btn-secondary" onclick="clearLogs()">Clear</button>
-                                <button class="btn-primary" onclick="saveLog()">⬇ Save Log</button>
-                            </div>
-                        </div>
-                        <div id="log-output" class="log-output"></div>
-                        <div id="log-empty" class="log-empty" style="display:none;">No log entries yet.</div>
-                    </div>
-                </div> <!-- End of car-detail-content -->
-                </div>
+                </section>
             </div>
         </section>
 
-        <!-- ANALYTICS TAB -->
         <section id="analytics" class="tab-content">
-            <h2>Fleet Analytics</h2>
-            <div class="charts-grid">
-                <div class="chart-card">
-                    <h3>Fleet Status</h3>
-                    <canvas id="statusChart"></canvas>
-                </div>
-                <div class="chart-card">
-                    <h3>FPS Performance</h3>
-                    <canvas id="fpsChart"></canvas>
-                </div>
+            <div class="panel-card">
+                <h2>Fleet Analytics</h2>
+                <canvas id="statusChart"></canvas>
             </div>
         </section>
 
-        <!-- SETTINGS TAB -->
         <section id="settings" class="tab-content">
-            <h2>Global Settings</h2>
-            <div class="control-group" style="max-width: 500px">
-                <h3>Host Preferences</h3>
+            <div class="panel-card settings-card">
+                <h2>Global Settings</h2>
                 <div class="form-row">
-                    <label>Poll Interval (ms):</label>
+                    <label for="setting-poll">Poll Interval (ms)</label>
                     <input type="number" id="setting-poll" value="2000">
                 </div>
-                <div class="form-row">
-                    <label>Default API Timeout (s):</label>
-                    <input type="number" id="setting-timeout" value="2">
-                </div>
-                <div class="btn-row">
-                   <button class="btn-primary" onclick="saveGlobalSettings()">Save Settings</button>
-                </div>
+                <button class="btn-primary" id="save-global-settings-btn">Save Settings</button>
             </div>
         </section>
-
     </main>
-
-    <!-- Modal for Adding Car -->
-    <div id="add-modal" class="modal">
-        <div class="modal-content">
-            <h3>Add New Car</h3>
-            <input type="text"     id="new-name" placeholder="Car Name (e.g. Racer 1)">
-            <input type="text"     id="new-ip"   placeholder="IP Address (e.g. 192.168.1.50)">
-            <input type="number"   id="new-port" placeholder="Port" value="8000">
-            <input type="password" id="new-password" placeholder="Password (must match car)">
-            <div class="modal-actions">
-                <button class="btn-secondary" onclick="closeAddModal()">Cancel</button>
-                <button class="btn-primary" onclick="addCar()">Add</button>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Modal for Config Car -->
-    <div id="config-modal" class="modal">
-        <div class="modal-content" style="width: 600px;">
-            <h3>Edit Car Configuration</h3>
-            <div class="scroll-form" style="max-height: 60vh; overflow-y: auto; margin-bottom: 1rem;">
-                
-                <h4>Camera</h4>
-                <div class="form-row"><label>Type:</label>
-                    <select id="cfg-cam-type">
-                        <option value="opencv">OpenCV</option>
-                        <option value="realsense">RealSense</option>
-                    </select>
-                </div>
-                 <div class="form-row"><label>Width:</label><input type="number" id="cfg-cam-w" value="640"></div>
-                 <div class="form-row"><label>Height:</label><input type="number" id="cfg-cam-h" value="480"></div>
-                 <div class="form-row"><label>FPS:</label><input type="number" id="cfg-cam-fps" value="30"></div>
-                 
-                 <h4>Models</h4>
-                 <div class="form-row"><label>Control Backend:</label>
-                    <select id="cfg-ctl-type">
-                        <option value="pytorch">PyTorch</option>
-                        <option value="tensorrt">TensorRT</option>
-                        <option value="rockchip">Rockchip NPU</option>
-                    </select>
-                 </div>
-                 <div class="form-row"><label>Architecture:</label>
-                    <select id="cfg-ctl-arch">
-                        <option value="resnet18">ResNet-18</option>
-                        <option value="resnet34">ResNet-34</option>
-                        <option value="resnet50">ResNet-50</option>
-                        <option value="resnet101">ResNet-101</option>
-                    </select>
-                 </div>
-                 <div class="form-row"><label>Control Model Path:</label><input type="text" id="cfg-ctl-path" value="checkpoints/best_model.pth"></div>
-                 <small style="color: #888; margin-top: -10px; display: block; margin-bottom: 10px;">Use absolute path on Jetson, e.g. /home/jetson/...</small>
-                 
-                 <div class="form-row"><label>Detection Model Path:</label><input type="text" id="cfg-det-path" value="yolov8n.pt"></div>
-                 
-                 <h4>Runtime</h4>
-                 <div class="form-row"><label>Device:</label><input type="text" id="cfg-device" value="cuda"></div>
-                 <div class="form-row"><label>Action Loop (comma sep):</label><input type="text" id="cfg-actions" value="control,detection,api"></div>
-            
-            </div>
-            <div class="modal-actions">
-                <button class="btn-secondary" onclick="resetConfigToDefaults()" style="margin-right: auto;">Reset to Defaults</button>
-                <button class="btn-secondary" onclick="closeConfigModal()">Cancel</button>
-                <button class="btn-success" onclick="deployConfig()">Deploy Config</button>
-            </div>
-        </div>
-    </div>
 
     <script src="/static/app.js"></script>
 </body>
