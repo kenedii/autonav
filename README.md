@@ -102,6 +102,9 @@ Experiment 5 and 6 are identical to 1 and 2 respectively, these were just create
 - IR_path: File path of IR image from Realsense Camera
 - Depth_path: File path of Depth map image from Realsense Camera
 
+## Demo Video - AutoNav V1 
+
+https://github.com/user-attachments/assets/af635698-d848-48ed-9db1-3eb8aa4ac871
 
 ## Troubleshooting
 
