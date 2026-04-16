@@ -102,6 +102,23 @@ Experiment 5 and 6 are identical to 1 and 2 respectively, these were just create
 - IR_path: File path of IR image from Realsense Camera
 - Depth_path: File path of Depth map image from Realsense Camera
 
+## Pre-trained Model Weights
+
+Several pre-trained models are available [from our Huggingface repository](https://huggingface.co/everestt/autonav/tree/main).
+
+The pre-trained AutoNav Models we have available are:
+- AutoNav v1 (Best model: AutoNav-v1-34: Steering Pseudo Accuracy of 72.70%)
+  - Predicts normalized steering value from RGB image
+- AutoNav v2 (Best model: AutoNav-v2-34: Steering Pseudo Accuracy of 94.20%)
+  - Predicts normalized steering and throttle values from RGB image
+
+The Steering Pseudo Accuracy evaluation metric sorts validation images into [Left, Centre, Right] bins and evaluates accuracy to predict a normalized steering value within the correct bin.
+
+Some model training runs were done with a capped throttle value for safety reasons, so it may not predict high throttle values. To convert the normalized throttle prediction from the model output to a [-1.0, 1.0] range, apply the formula: 
+- **new_norm_throttle = max(-1.0, min(1.0, model_output × 3.33))**
+
+*Note: Our pretrained steering models predict +1.0 for left and -1.0 for right. The output value may need to be inverted (multiply by -1) depending on the car motor driver module.*
+
 ## Demos 
 
 ### Training Data Example (Post-Augmentations)
