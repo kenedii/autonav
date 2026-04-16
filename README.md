@@ -7,7 +7,7 @@ It allows you to take a Single Board Computer with CUDA cores or a Rockchip NPU,
 - Use a Data Management Frontend to clean your data and generate augmented images.
 - Train a model to predict steering and/or throttle values
   - Resnet CNN Backbone to extract features from RGB images
-  - MLP Regressor to predict normalized steering and/or throttle values from extracted features
+  - MLP Regressor with Tanh head to predict normalized steering and/or throttle values from extracted features
 - Run the model and watch the car autonomously drive around your track
 - Use the Fleet Management Frontend to remotely start/stop vehicle, load new models, camera live view, and view logs.
 
