@@ -72,14 +72,19 @@ python3 inference/run_autonomous_resnet.py \
 
 ## Two-member contribution map
 
-- Nicolas Maitland
-  - Jetson integration
-  - final live-demo validation
-  - runtime bring-up and presentation prep
+- Nick
+  - hardware / Jetson integration
+  - Jetson-side runtime bring-up and final live-demo validation
+  - familiarity with Jetson-side prototype/runtime integrations used during final testing
 
-- Chris Kenedi / `kenedii`
-  - shared codebase foundation
-  - fleet/dashboard architecture
-  - broader project implementation
+- Chris
+  - model training workflow
+  - dashboard / API and broader shared codebase implementation
+  - major contributor to the repository foundation
+
+- Shared / collaborative areas
+  - data collection
+  - deployment support
+  - testing / reproducibility / demo support
 
 Use subsystem familiarity during code review rather than claiming one-person ownership of every file.

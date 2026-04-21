@@ -239,13 +239,25 @@ Known limitation:
 
 This project has two members:
 
-- Nicolas Maitland
-- Chris Kenedi / `kenedii`
+- Nick
+- Chris
 
 For the final presentation, contributions should be described by subsystem familiarity rather than exclusive authorship. The Git history is mixed across shared files, so the safest summary is:
 
-- Nicolas Maitland: primary familiarity with Jetson integration, final live-demo validation, AutoNav v2 runtime bring-up, and final presentation/reproducibility preparation
-- Chris Kenedi / `kenedii`: major contributor to the shared project codebase, fleet/dashboard architecture, and overall repository foundation
+- Nick
+  - hardware / Jetson integration
+  - Jetson-side runtime bring-up and live-demo validation
+  - familiarity with the Jetson-side prototype/runtime integrations used during final testing
+
+- Chris
+  - model training workflow
+  - dashboard / API and broader shared codebase implementation
+  - major contributor to the repository foundation
+
+- Shared / collaborative areas
+  - data collection
+  - deployment support
+  - testing / reproducibility / demo support
 
 During code review, present ownership by module familiarity rather than claiming strict one-person ownership of every file.
 
