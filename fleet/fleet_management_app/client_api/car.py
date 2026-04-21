@@ -60,9 +60,16 @@ class CarClient:
         
         # Default Throttle
         self.fixed_throttle = 0.22
-        
+
         # Try Auto-Config (Defaults)
-        import os
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+        autonav_v2_path = os.path.join(
+            repo_root,
+            "checkpoints",
+            "AutoNav-v2",
+            "AutoNav-v2-34",
+            "AutoNav-v2-34.pth",
+        )
         if os.path.exists("best_model.pth"):
              logger.info("Auto-loading local 'best_model.pth'...")
              default_config = {
@@ -85,6 +92,24 @@ class CarClient:
                  self.configure(default_config)
              except Exception as e:
                  logger.error(f"Auto-config failed: {e}")
+        elif os.path.exists(autonav_v2_path):
+             logger.info("Auto-loading local AutoNav v2 checkpoint at %s", autonav_v2_path)
+             default_config = {
+                 "device": "cuda",
+                 "architecture": "resnet34",
+                 "cameras": [{"type": "realsense", "width": 640, "height": 480, "fps": 15}],
+                 "control_model_type": "pytorch",
+                 "control_model": autonav_v2_path,
+                 "detection_model": "yolov8n.pt",
+                 "throttle_mode": "ai",
+                 "invert_steering": True,
+                 "throttle_output_scale": 3.33,
+                 "action_loop": ["control", "detection"],
+             }
+             try:
+                 self.configure(default_config)
+             except Exception as e:
+                 logger.error(f"Auto-config failed: {e}")
 
     def set_throttle_mode(self, mode, value=None):
         with self.lock:
@@ -92,6 +117,28 @@ class CarClient:
              if value is not None:
                  self.fixed_throttle = value
              logger.info(f"Throttle mode set to {mode} (val={value})")
+
+    @staticmethod
+    def _extract_control_prediction(prediction):
+        if isinstance(prediction, dict):
+            steer_norm = float(prediction.get("steering", 0.0))
+            throttle = prediction.get("throttle")
+            return steer_norm, None if throttle is None else float(throttle)
+
+        values = np.asarray(prediction, dtype=np.float32).reshape(-1)
+        if values.size == 0:
+            return 0.0, None
+        if values.size == 1:
+            return float(values[0]), None
+        return float(values[0]), float(values[1])
+
+    def _throttle_to_pulse_width(self, throttle_norm):
+        throttle_norm = float(np.clip(throttle_norm, -1.0, 1.0))
+        if throttle_norm >= 0.0:
+            span = self.THROTTLE_MAX - self.THROTTLE_CENTER
+        else:
+            span = self.THROTTLE_CENTER - self.THROTTLE_MIN
+        return int(self.THROTTLE_CENTER + (throttle_norm * span))
 
     def configure(self, config: Dict[str, Any]):
         with self.lock:
@@ -236,7 +283,7 @@ class CarClient:
         if self.motor_controller:
              time.sleep(1.0)
         
-        throttle_us = self.THROTTLE_CENTER + int(self.fixed_throttle * (self.THROTTLE_MAX - self.THROTTLE_CENTER))
+        throttle_us = self._throttle_to_pulse_width(self.fixed_throttle)
         
         while self.running:
             loop_start = time.time()
@@ -309,12 +356,13 @@ class CarClient:
                     
                     if override_steer is not None:
                         steer_norm = override_steer
+                        ai_throttle = None
                     else:
-                        steer_norm = self.control_model.predict(frame_color)
-                    
-                    if throttle_mode == 'ai':
-                        # Placeholder: if model returned throttle, we would use it here.
-                        pass 
+                        prediction = self.control_model.predict(frame_color)
+                        steer_norm, ai_throttle = self._extract_control_prediction(prediction)
+
+                    if throttle_mode == 'ai' and ai_throttle is not None:
+                        current_throttle = ai_throttle
 
                     # Convert to PWM
                     # steer_norm is -1 to 1
@@ -324,7 +372,7 @@ class CarClient:
                     pulse = np.clip(pulse, 1000, 2000)
                     
                     # Calculate throttle pulse
-                    throttle_us = self.THROTTLE_CENTER + int(current_throttle * (self.THROTTLE_MAX - self.THROTTLE_CENTER))
+                    throttle_us = self._throttle_to_pulse_width(current_throttle)
                     
                     if self.motor_controller:
                         self.motor_controller.set_us(self.STEERING_CHANNEL, pulse)

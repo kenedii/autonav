@@ -139,6 +139,8 @@ class ClientConfig(BaseModel):
     detection_model: str
     throttle_mode: str = 'fixed' # 'fixed' or 'ai'
     fixed_throttle_value: float = 0.22
+    invert_steering: Optional[bool] = None
+    throttle_output_scale: Optional[float] = None
     action_loop: List[str] = ['control', 'detection', 'api']
     ip: str = "0.0.0.0"
     port: int = 8000

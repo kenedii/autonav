@@ -10,6 +10,7 @@ from torchvision import models
 parser = argparse.ArgumentParser(description='Optimize PyTorch model to TensorRT')
 parser.add_argument('--exp', type=int, default=1, choices=[1,2,3,4,5,6,7,8], help='Experiment ID (1-8)')
 parser.add_argument('--arch', type=str, default='resnet18', choices=['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152'], help='Model architecture')
+parser.add_argument('--workspace-mb', type=int, default=512, help='TensorRT builder workspace size in MiB')
 args = parser.parse_args()
 
 # ------------------------------------------------------------
@@ -121,16 +122,17 @@ print("[OK] Model loaded and set to eval mode")
 # 5. Create dummy input (must match inference size)
 # ------------------------------------------------------------
 dummy_input = torch.ones((1, IN_CHANNELS, 120, 160)).to(device)
+workspace_size = max(1, args.workspace_mb) << 20
 
 # ------------------------------------------------------------
 # 6. Convert to TensorRT (FP16 = huge speed boost on Nano)
 # ------------------------------------------------------------
-print("[INFO] Converting to TensorRT with FP16... (30–90 seconds)")
+print(f"[INFO] Converting to TensorRT with FP16 and {args.workspace_mb} MiB workspace... (30–90 seconds)")
 model_trt = torch2trt(
     model,
     [dummy_input],
     fp16_mode=True,           # ← critical for speed on Jetson Nano
-    max_workspace_size=1 << 25,  # 512MB workspace
+    max_workspace_size=workspace_size,
     use_onnx=False
 )
 
