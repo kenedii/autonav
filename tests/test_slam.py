@@ -21,8 +21,11 @@ try:
     from .slam import VisualSlamSystem
 except ImportError:
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    if current_dir not in sys.path:
-        sys.path.append(current_dir)
+    repo_root = os.path.dirname(current_dir)
+    client_api_dir = os.path.join(repo_root, "fleet", "fleet_management_app", "client_api")
+    for path in (current_dir, client_api_dir):
+        if path not in sys.path:
+            sys.path.append(path)
     from hardware import get_camera
     from slam import VisualSlamSystem
 
@@ -51,6 +54,8 @@ def draw_pose_overlay(frame_bgr, pose, frame_idx):
         f"X: {pose['x']:.3f} m",
         f"Y: {pose['y']:.3f} m",
         f"Theta: {pose['theta']:.3f} rad",
+        f"Motion: {pose.get('motion_source', 'n/a')}",
+        f"Track/RGBD: {pose.get('tracking_points', 0)}/{pose.get('rgbd_points', 0)}",
     ]
 
     for idx, text in enumerate(lines):
@@ -89,23 +94,38 @@ def draw_map(pose, size=500, scale=60.0):
     return canvas
 
 
-def resolve_rgb_path(run_dir, row):
-    rgb_path = row.get("rgb_path")
-    if not rgb_path:
+def resolve_run_asset_path(run_dir, row, key):
+    asset_path = row.get(key)
+    if not asset_path:
         return None
 
-    if os.path.isabs(rgb_path):
-        return rgb_path
+    if os.path.isabs(asset_path):
+        return asset_path
 
-    candidate = os.path.join(run_dir, os.path.basename(rgb_path))
-    if os.path.exists(candidate):
-        return candidate
+    candidates = [
+        os.path.join(run_dir, os.path.basename(asset_path)),
+        os.path.join(os.path.dirname(os.path.dirname(run_dir)), asset_path),
+        os.path.join(os.getcwd(), asset_path),
+    ]
 
-    candidate = os.path.join(os.getcwd(), rgb_path)
-    if os.path.exists(candidate):
-        return candidate
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
 
     return None
+
+
+def parse_optional_triplet(row, prefix):
+    values = []
+    for axis in ("x", "y", "z"):
+        raw = row.get(f"{prefix}_{axis}")
+        if raw in (None, ""):
+            return None
+        try:
+            values.append(float(raw))
+        except ValueError:
+            return None
+    return values
 
 
 def replay_run(run_dir):
@@ -116,7 +136,18 @@ def replay_run(run_dir):
     with open(csv_path, newline="") as csv_file:
         reader = csv.DictReader(csv_file)
         for row in reader:
-            rgb_path = resolve_rgb_path(run_dir, row)
+            depth_map = None
+            depth_path = resolve_run_asset_path(run_dir, row, "depth_path")
+            if depth_path is not None:
+                depth_map = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                if depth_map is not None and depth_map.ndim == 3:
+                    depth_map = cv2.cvtColor(depth_map, cv2.COLOR_BGR2GRAY)
+
+            rgb_path = None
+            if depth_path is not None:
+                rgb_path = resolve_run_asset_path(run_dir, row, "realsense_rgb_path")
+            if rgb_path is None:
+                rgb_path = resolve_run_asset_path(run_dir, row, "rgb_path")
             if rgb_path is None:
                 continue
 
@@ -130,7 +161,15 @@ def replay_run(run_dir):
             except ValueError:
                 throttle = 0.0
 
-            yield frame_bgr, None, None, throttle
+            imu_data = {}
+            accel = parse_optional_triplet(row, "accel")
+            if accel is not None:
+                imu_data["accel"] = accel
+            gyro = parse_optional_triplet(row, "gyro")
+            if gyro is not None:
+                imu_data["gyro"] = gyro
+
+            yield frame_bgr, depth_map, imu_data or None, throttle
 
 
 def live_frames(args):
@@ -162,6 +201,8 @@ def main():
     slam = None
     frame_idx = 0
     last_pose = None
+    motion_counts = {}
+    rgbd_points = []
 
     try:
         for frame_color, frame_depth, imu_data, throttle in frame_iter:
@@ -172,11 +213,17 @@ def main():
 
             pose = slam.update(frame_color, depth_map=frame_depth, throttle_val=throttle, imu_data=imu_data)
             last_pose = pose
+            source = pose.get("motion_source", "unknown")
+            motion_counts[source] = motion_counts.get(source, 0) + 1
+            if pose.get("rgbd_points"):
+                rgbd_points.append(int(pose["rgbd_points"]))
 
             if frame_idx % max(1, args.print_every) == 0:
                 print(
                     f"[{frame_idx:05d}] x={pose['x']:.3f} "
-                    f"y={pose['y']:.3f} theta={pose['theta']:.3f}"
+                    f"y={pose['y']:.3f} theta={pose['theta']:.3f} "
+                    f"motion={source} track={pose.get('tracking_points', 0)} "
+                    f"rgbd={pose.get('rgbd_points', 0)}"
                 )
 
             if args.show:
@@ -210,6 +257,12 @@ def main():
             f"[SLAM] Final pose: x={last_pose['x']:.3f} "
             f"y={last_pose['y']:.3f} theta={last_pose['theta']:.3f}"
         )
+        print(f"[SLAM] Motion source counts: {motion_counts}")
+        if rgbd_points:
+            print(
+                f"[SLAM] RGB-D correspondences: median={int(np.median(rgbd_points))} "
+                f"max={max(rgbd_points)} frames={len(rgbd_points)}"
+            )
     else:
         print("[SLAM] No frames were processed.")
 

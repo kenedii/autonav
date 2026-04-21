@@ -84,7 +84,18 @@ class SensorDataset(Dataset):
             path = ensure_full_path(row.get(feat))
             img = None
             if path and os.path.exists(path):
-                if 'depth' in feat or 'ir' in feat:
+                if 'depth' in feat:
+                    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                    if img is not None:
+                        if img.ndim == 3:
+                            # Legacy runs may store colorized depth previews.
+                            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+                        else:
+                            # Raw RealSense depth is uint16 millimeters; clip to 5 m.
+                            img = np.clip(img.astype(np.float32), 0.0, 5000.0) / 5000.0
+                        img = cv2.resize(img, (IMG_WIDTH, IMG_HEIGHT))
+                        img = np.expand_dims(img.astype(np.float32), axis=0)
+                elif 'ir' in feat:
                     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
                     if img is not None:
                         img = cv2.resize(img, (IMG_WIDTH, IMG_HEIGHT))

@@ -64,6 +64,8 @@ To collect data by manually driving the car around the track, you must have a ga
 
 CAM0 is the primary forward RGB source for lane following, while the **Intel RealSense D435i** remains active as a sidecar for depth-stop and IMU context. CAM1 is reserved for rear-preview / reverse-only scaffolding. Steering commands are sent to the PCA9685 servo driver in real time.
 
+When recording with `--camera realsense --record_mode all`, `depth_path` stores aligned raw `uint16` depth PNGs in millimeters for replay/training. New runs also persist aligned full-resolution RealSense RGB (`realsense_rgb_path`) plus accel/gyro vectors and stream timestamps in `dataset.csv`. Older runs may still contain colorized preview PNGs and no IMU columns.
+
 ## Software
 
 - Ubuntu 18.04.6 LTS

@@ -55,7 +55,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type")
 parser.add_argument("--device", type=int, default=0, help="Camera device ID (for opencv)")
 parser.add_argument('--primary_rgb_source', type=str, default='main_camera', choices=['main_camera', 'cam0'], help='Primary RGB source for canonical rgb_path')
-parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+depth')
+parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+raw depth')
 parser.add_argument('--control_mode', type=str, default=None, choices=['joystick', 'steer_trigger'], help='Optional override for control mapping: "steer_trigger" uses left trigger for accel')
 parser.add_argument('--always_save', action='store_true', help='Save frames at TARGET_FPS even when controls have not changed')
 parser.add_argument('--view_360', action='store_true', help='Also record two Jetson CSI cameras connected to CAM0/CAM1')
@@ -546,6 +546,18 @@ def get_dataset_header():
         "cam1_path",
         "ir_path",
         "depth_path",
+        "realsense_rgb_path",
+        "realsense_rgb_ts_ms",
+        "depth_ts_ms",
+        "ir_ts_ms",
+        "accel_x",
+        "accel_y",
+        "accel_z",
+        "accel_ts_ms",
+        "gyro_x",
+        "gyro_y",
+        "gyro_z",
+        "gyro_ts_ms",
     ]
 
 RUN_DIR = create_new_session()
@@ -570,7 +582,32 @@ def save_canonical_frame(image, path, profile, output_size=DEFAULT_OUTPUT_SIZE):
         image_small = cv2.resize(image, output_size)
     cv2.imwrite(path, image_small)
 
-def build_row_metadata(rgb_source, depth_source, imu_source, rear_rgb_source, preprocess_profile, cam0_path, cam1_path, ir_path, depth_path):
+def save_full_resolution_frame(image, path):
+    if image is None or path is None:
+        return
+    cv2.imwrite(path, image)
+
+def build_row_metadata(
+    rgb_source,
+    depth_source,
+    imu_source,
+    rear_rgb_source,
+    preprocess_profile,
+    cam0_path,
+    cam1_path,
+    ir_path,
+    depth_path,
+    realsense_rgb_path,
+    realsense_rgb_ts_ms,
+    depth_ts_ms,
+    ir_ts_ms,
+    accel,
+    accel_ts_ms,
+    gyro,
+    gyro_ts_ms,
+):
+    accel = accel if accel is not None else (None, None, None)
+    gyro = gyro if gyro is not None else (None, None, None)
     return [
         rgb_source,
         depth_source,
@@ -583,6 +620,18 @@ def build_row_metadata(rgb_source, depth_source, imu_source, rear_rgb_source, pr
         cam1_path,
         ir_path,
         depth_path,
+        realsense_rgb_path,
+        realsense_rgb_ts_ms,
+        depth_ts_ms,
+        ir_ts_ms,
+        accel[0],
+        accel[1],
+        accel[2],
+        accel_ts_ms,
+        gyro[0],
+        gyro[1],
+        gyro[2],
+        gyro_ts_ms,
     ]
 
 def writer_worker():
@@ -615,9 +664,24 @@ def writer_worker():
             except Exception as e:
                 print(f"Write error: {e}")
         elif cmd == "FRAME_ALL":
-            _, rgb, ir_image, depth_map, row_data, rgb_path, rgb_profile, ir_path, depth_path, extra_frames = item
+            (
+                _,
+                rgb,
+                realsense_rgb,
+                ir_image,
+                depth_map,
+                row_data,
+                rgb_path,
+                rgb_profile,
+                realsense_rgb_path,
+                ir_path,
+                depth_path,
+                extra_frames,
+            ) = item
             try:
                 save_canonical_frame(rgb, rgb_path, rgb_profile)
+                if realsense_rgb is not None and realsense_rgb_path is not None:
+                    save_full_resolution_frame(realsense_rgb, realsense_rgb_path)
                 if ir_image is not None and ir_path is not None:
                     cv2.imwrite(ir_path, ir_image)
                 if depth_map is not None and depth_path is not None:
@@ -662,39 +726,80 @@ def pwm_to_norm(us):
 
 def get_rgb_and_front_depth():
     if not CAMERA_ENABLED:
-        return None, 0.0, None, None
+        return None
 
-    ir_image = None
-    depth_map = None
-    center_depth = 0.0
-    rgb = None
+    packet = {
+        "primary_rgb": None,
+        "realsense_rgb": None,
+        "realsense_rgb_ts_ms": None,
+        "depth_front": 0.0,
+        "ir_image": None,
+        "ir_ts_ms": None,
+        "depth_map": None,
+        "depth_ts_ms": None,
+        "accel": None,
+        "accel_ts_ms": None,
+        "gyro": None,
+        "gyro_ts_ms": None,
+    }
 
     if PRIMARY_RGB_IS_CAM0:
         if cam_rig is None or not cam_rig.cam0_ok:
-            return None, None, None, None
+            return None
 
     if args.camera == 'realsense' and hasattr(realsense_full, 'get_all_frames') and args.record_mode == 'all':
-        if hasattr(realsense_full, 'get_all_frames'):
-            rgb, center_depth, ir_image, depth_map = realsense_full.get_all_frames()
+        sensor_packet = realsense_full.get_sensor_packet(raw_depth=True) if hasattr(realsense_full, 'get_sensor_packet') else None
+        if sensor_packet is None:
+            if hasattr(realsense_full, 'get_all_frames'):
+                rgb, center_depth, ir_image, depth_map = realsense_full.get_all_frames(raw_depth=True)
+                packet["realsense_rgb"] = rgb
+                packet["depth_front"] = float(center_depth or 0.0)
+                packet["ir_image"] = ir_image
+                packet["depth_map"] = depth_map
+            else:
+                rgb, center_depth = realsense_full.get_aligned_frames()
+                packet["realsense_rgb"] = rgb
+                packet["depth_front"] = float(center_depth or 0.0)
         else:
-            rgb, center_depth = realsense_full.get_aligned_frames()
-        center_depth = float(center_depth or 0.0)
+            packet["realsense_rgb"] = sensor_packet.get("rgb")
+            packet["realsense_rgb_ts_ms"] = sensor_packet.get("rgb_timestamp_ms")
+            packet["depth_front"] = float(sensor_packet.get("depth_center", 0.0) or 0.0)
+            packet["ir_image"] = sensor_packet.get("ir")
+            packet["ir_ts_ms"] = sensor_packet.get("ir_timestamp_ms")
+            packet["depth_map"] = sensor_packet.get("depth_image")
+            packet["depth_ts_ms"] = sensor_packet.get("depth_timestamp_ms")
+            packet["accel"] = tuple(float(v) for v in sensor_packet.get("accel")) if sensor_packet.get("accel") is not None else None
+            packet["accel_ts_ms"] = sensor_packet.get("accel_timestamp_ms")
+            packet["gyro"] = tuple(float(v) for v in sensor_packet.get("gyro")) if sensor_packet.get("gyro") is not None else None
+            packet["gyro_ts_ms"] = sensor_packet.get("gyro_timestamp_ms")
     else:
         rgb, center_depth = realsense_full.get_aligned_frames()
-        center_depth = float(center_depth or 0.0)
+        packet["realsense_rgb"] = rgb
+        packet["depth_front"] = float(center_depth or 0.0)
 
     if PRIMARY_RGB_IS_CAM0 and cam_rig is not None:
         cam0_frame, _ = cam_rig.get_frames()
-        rgb = cam0_frame
+        packet["primary_rgb"] = cam0_frame
+    else:
+        packet["primary_rgb"] = packet["realsense_rgb"]
 
-    if rgb is None:
-        return None, None, None, None
+    if packet["primary_rgb"] is None:
+        return None
 
     if not (args.record_mode == 'all' and args.camera == 'realsense'):
-        ir_image = None
-        depth_map = None
+        packet["ir_image"] = None
+        packet["ir_ts_ms"] = None
+        packet["depth_map"] = None
+        packet["depth_ts_ms"] = None
+        packet["accel"] = None
+        packet["accel_ts_ms"] = None
+        packet["gyro"] = None
+        packet["gyro_ts_ms"] = None
+        if PRIMARY_RGB_IS_CAM0:
+            packet["realsense_rgb"] = None
+            packet["realsense_rgb_ts_ms"] = None
 
-    return rgb, center_depth, ir_image, depth_map
+    return packet
 
 def get_view_360_capture(frame_number):
     global view_360_waiting_logged
@@ -851,14 +956,24 @@ def recording_worker():
                 
                 # Save if inputs changed beyond threshold OR user requested always-save
                 if args.always_save or abs(s_us - last_steer_rec) >= MIN_CHANGE_US or abs(t_us - last_throttle_rec) >= MIN_CHANGE_US:
-                        rgb, depth_front, ir_image, depth_map = get_rgb_and_front_depth()
-                        if rgb is not None:
+                        sensor_packet = get_rgb_and_front_depth()
+                        if sensor_packet is not None:
                             extra_frames, extra_paths = get_view_360_capture(frame_idx)
                             if extra_frames is None:
                                 time.sleep(0.005)
                                 continue
 
+                            rgb = sensor_packet["primary_rgb"]
+                            depth_front = sensor_packet["depth_front"]
+                            ir_image = sensor_packet["ir_image"]
+                            depth_map = sensor_packet["depth_map"]
+                            realsense_rgb = sensor_packet["realsense_rgb"]
                             rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                            realsense_rgb_path = (
+                                os.path.join(RUN_DIR, f"rs_rgb_{frame_idx:05d}.png")
+                                if realsense_rgb is not None and args.camera == "realsense" and args.record_mode == "all"
+                                else None
+                            )
                             ir_path = os.path.join(RUN_DIR, f"ir_{frame_idx:05d}.png") if ir_image is not None else None
                             depth_path = os.path.join(RUN_DIR, f"depth_{frame_idx:05d}.png") if depth_map is not None else None
 
@@ -890,6 +1005,14 @@ def recording_worker():
                                     cam1_path,
                                     ir_path,
                                     depth_path,
+                                    realsense_rgb_path,
+                                    sensor_packet["realsense_rgb_ts_ms"],
+                                    sensor_packet["depth_ts_ms"],
+                                    sensor_packet["ir_ts_ms"],
+                                    sensor_packet["accel"],
+                                    sensor_packet["accel_ts_ms"],
+                                    sensor_packet["gyro"],
+                                    sensor_packet["gyro_ts_ms"],
                                 ),
                             ]
                             if not write_queue.full():
@@ -898,11 +1021,13 @@ def recording_worker():
                                     write_queue.put((
                                         "FRAME_ALL",
                                         rgb,
+                                        realsense_rgb,
                                         ir_image,
                                         depth_map,
                                         row_data,
                                         rgb_path,
                                         PREPROCESS_PROFILE,
+                                        realsense_rgb_path,
                                         ir_path,
                                         depth_path,
                                         extra_frames,

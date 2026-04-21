@@ -23,7 +23,7 @@ import realsense_full  # Your verified RealSense pipeline
 parser = argparse.ArgumentParser()
 parser.add_argument("--camera", type=str, default="realsense", choices=["realsense", "opencv", "other"], help="Camera type")
 parser.add_argument("--device", type=int, default=0, help="Camera device ID (for opencv)")
-parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+depth')
+parser.add_argument('--record_mode', type=str, default='rgb', choices=['rgb', 'all'], help='Recording mode: "rgb" for control+RGB only, "all" for control+RGB+IR+raw depth')
 parser.add_argument('--control_mode', type=str, default='joystick', choices=['joystick', 'steer_trigger'], help='Control mapping: "joystick" (default) or "steer_trigger" (steer by stick, left trigger for accel)')
 parser.add_argument('--always_save', action='store_true', help='Save frames at TARGET_FPS even when controls have not changed')
 args = parser.parse_args()
@@ -182,7 +182,7 @@ def get_rgb_and_front_depth():
     # Use optimized fetch from realsense_full which works for both RealSense and OpenCV
     if args.record_mode == 'all' and args.camera == 'realsense':
         # Try to get all data (RGB, IR, depth)
-        rgb, depth_center, ir_image, depth_map = realsense_full.get_all_frames() if hasattr(realsense_full, 'get_all_frames') else (None, None, None, None)
+        rgb, depth_center, ir_image, depth_map = realsense_full.get_all_frames(raw_depth=True) if hasattr(realsense_full, 'get_all_frames') else (None, None, None, None)
         if rgb is None:
             return None, None, None, None
         rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
@@ -336,4 +336,3 @@ finally:
         realsense_full.pipeline.stop()
         print("[RealSense] Pipeline stopped.")
     print(f"\nDATA SAVED -> {RUN_DIR}")
-

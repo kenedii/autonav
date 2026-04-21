@@ -30,26 +30,167 @@ CSI_BACKEND = "auto"
 REALSENSE_ENABLE_DEPTH = True
 REALSENSE_ENABLE_IR = True
 REALSENSE_ENABLE_DEPTH_PREVIEW = True
+REALSENSE_ENABLE_IMU = True
 
 # Global objects - created once
 pipeline = None
 align = None
+pipeline_profile = None
+motion_pipeline = None
+motion_sensor = None
+motion_queue = None
 cap = None # for opencv
 gst_pipeline = None
 gst_sink = None
 csi_backend = None
-# Store RGB, center depth, IR image and a small colorized depth map.
+# Store RGB, center depth, IR image, raw aligned depth, and an optional preview.
 # `rgb_seq` increments on each new frame so consumers can skip duplicate work.
 latest_frames = {
     "rgb": None,
     "rgb_seq": 0,
+    "rgb_timestamp_ms": None,
     "depth_center": 0.0,
     "ir": None,
-    "depth_map": None,
+    "ir_timestamp_ms": None,
+    "depth_raw": None,
+    "depth_timestamp_ms": None,
+    "depth_preview": None,
+    "accel": None,
+    "accel_timestamp_ms": None,
+    "gyro": None,
+    "gyro_timestamp_ms": None,
 }
 
 frame_lock = threading.Lock()
 stop_event = threading.Event()
+
+
+def _update_motion_sample(frame):
+    try:
+        motion = frame.as_motion_frame().get_motion_data()
+        sample = np.array([motion.x, motion.y, motion.z], dtype=np.float32)
+        timestamp_ms = float(frame.get_timestamp())
+        stream_type = frame.get_profile().stream_type()
+    except Exception:
+        return
+
+    with frame_lock:
+        if stream_type == rs.stream.accel:
+            latest_frames["accel"] = sample
+            latest_frames["accel_timestamp_ms"] = timestamp_ms
+        elif stream_type == rs.stream.gyro:
+            latest_frames["gyro"] = sample
+            latest_frames["gyro_timestamp_ms"] = timestamp_ms
+
+
+def _pick_motion_profile(sensor, stream_type, preferred_fps):
+    fallback = None
+    for profile in sensor.get_stream_profiles():
+        try:
+            motion_profile = profile.as_video_stream_profile()
+            if motion_profile.stream_type() != stream_type:
+                continue
+            fallback = profile
+            if (
+                motion_profile.format() == rs.format.motion_xyz32f
+                and motion_profile.fps() == preferred_fps
+            ):
+                return profile
+        except Exception:
+            continue
+    return fallback
+
+
+def _start_motion_streams(device):
+    global motion_pipeline, motion_sensor, motion_queue
+
+    serial = None
+    try:
+        serial = device.get_info(rs.camera_info.serial_number)
+    except Exception:
+        serial = None
+
+    motion_pipeline = rs.pipeline()
+    motion_config = rs.config()
+    if serial:
+        motion_config.enable_device(serial)
+
+    # The direct first_motion_sensor().start(queue) path has been flaky on the
+    # Jetson Nano. A dedicated IMU-only pipeline with callback delivery has
+    # proven materially more reliable with the patched native backend.
+    motion_config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 100)
+    motion_config.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f, 400)
+
+    def motion_callback(frame):
+        try:
+            if frame.is_motion_frame():
+                _update_motion_sample(frame)
+        except Exception:
+            pass
+
+    motion_pipeline.start(motion_config, motion_callback)
+    motion_sensor = None
+    motion_queue = None
+
+
+def _update_video_frames(frames):
+    aligned_frames = align.process(frames) if align is not None else frames
+
+    color_frame = aligned_frames.get_color_frame()
+    depth_frame = aligned_frames.get_depth_frame() if REALSENSE_ENABLE_DEPTH else None
+    ir_frame = aligned_frames.get_infrared_frame(1) if REALSENSE_ENABLE_IR else None
+
+    if not color_frame or (depth_frame is None and REALSENSE_ENABLE_DEPTH):
+        return
+
+    rgb = np.asanyarray(color_frame.get_data()).copy()
+    rgb_timestamp_ms = float(color_frame.get_timestamp())
+
+    depth_center = 0.0
+    depth_timestamp_ms = None
+    if depth_frame is not None:
+        w = depth_frame.get_width()
+        h = depth_frame.get_height()
+        depth_center = float(depth_frame.get_distance(w // 2, h // 2))
+        depth_timestamp_ms = float(depth_frame.get_timestamp())
+
+    depth_raw = None
+    depth_preview = None
+    if depth_frame is not None:
+        depth_raw = np.asanyarray(depth_frame.get_data()).copy()
+
+    if REALSENSE_ENABLE_DEPTH_PREVIEW and depth_raw is not None:
+        try:
+            depth_mm = depth_raw.astype(np.float32)
+            vmax = np.percentile(depth_mm[depth_mm > 0], 95) if np.any(depth_mm > 0) else 1.0
+            vmin = np.percentile(depth_mm[depth_mm > 0], 5) if np.any(depth_mm > 0) else 0.0
+            if vmax <= vmin:
+                vmax = vmin + 1.0
+            norm = np.clip((depth_mm - vmin) / (vmax - vmin), 0.0, 1.0)
+            depth_preview = cv2.applyColorMap((255 * (1.0 - norm)).astype(np.uint8), cv2.COLORMAP_JET)
+        except Exception:
+            depth_preview = None
+
+    ir_image = None
+    ir_timestamp_ms = None
+    if REALSENSE_ENABLE_IR and ir_frame:
+        try:
+            ir_image = np.asanyarray(ir_frame.get_data()).copy()
+            ir_timestamp_ms = float(ir_frame.get_timestamp())
+        except Exception:
+            ir_image = None
+            ir_timestamp_ms = None
+
+    with frame_lock:
+        latest_frames["rgb"] = rgb
+        latest_frames["rgb_seq"] += 1
+        latest_frames["rgb_timestamp_ms"] = rgb_timestamp_ms
+        latest_frames["depth_center"] = depth_center
+        latest_frames["ir"] = ir_image
+        latest_frames["ir_timestamp_ms"] = ir_timestamp_ms
+        latest_frames["depth_raw"] = depth_raw
+        latest_frames["depth_timestamp_ms"] = depth_timestamp_ms
+        latest_frames["depth_preview"] = depth_preview
 
 def set_camera_type(
     type_name,
@@ -63,9 +204,10 @@ def set_camera_type(
     enable_depth=True,
     enable_ir=True,
     enable_depth_preview=True,
+    enable_imu=True,
 ):
     global CAMERA_TYPE, OPENCV_DEVICE_ID, CSI_SENSOR_ID, CSI_WIDTH, CSI_HEIGHT, CSI_FPS, CSI_FLIP_METHOD, CSI_BACKEND
-    global REALSENSE_ENABLE_DEPTH, REALSENSE_ENABLE_IR, REALSENSE_ENABLE_DEPTH_PREVIEW
+    global REALSENSE_ENABLE_DEPTH, REALSENSE_ENABLE_IR, REALSENSE_ENABLE_DEPTH_PREVIEW, REALSENSE_ENABLE_IMU
     CAMERA_TYPE = type_name
     OPENCV_DEVICE_ID = device_id
     CSI_SENSOR_ID = sensor_id
@@ -77,12 +219,21 @@ def set_camera_type(
     REALSENSE_ENABLE_DEPTH = bool(enable_depth)
     REALSENSE_ENABLE_IR = bool(enable_ir)
     REALSENSE_ENABLE_DEPTH_PREVIEW = bool(enable_depth_preview) and REALSENSE_ENABLE_DEPTH
+    REALSENSE_ENABLE_IMU = bool(enable_imu)
     with frame_lock:
         latest_frames["rgb"] = None
         latest_frames["rgb_seq"] = 0
+        latest_frames["rgb_timestamp_ms"] = None
         latest_frames["depth_center"] = 0.0
         latest_frames["ir"] = None
-        latest_frames["depth_map"] = None
+        latest_frames["ir_timestamp_ms"] = None
+        latest_frames["depth_raw"] = None
+        latest_frames["depth_timestamp_ms"] = None
+        latest_frames["depth_preview"] = None
+        latest_frames["accel"] = None
+        latest_frames["accel_timestamp_ms"] = None
+        latest_frames["gyro"] = None
+        latest_frames["gyro_timestamp_ms"] = None
 
 
 def build_csi_pipeline(sensor_id, width, height, fps, flip_method, appsink_name=None):
@@ -201,61 +352,47 @@ def camera_worker():
             with frame_lock:
                 latest_frames["rgb"] = rgb
                 latest_frames["rgb_seq"] += 1
+                latest_frames["rgb_timestamp_ms"] = None
                 latest_frames["depth_center"] = 0.0
+                latest_frames["ir"] = None
+                latest_frames["ir_timestamp_ms"] = None
+                latest_frames["depth_raw"] = None
+                latest_frames["depth_timestamp_ms"] = None
+                latest_frames["depth_preview"] = None
+                latest_frames["accel"] = None
+                latest_frames["accel_timestamp_ms"] = None
+                latest_frames["gyro"] = None
+                latest_frames["gyro_timestamp_ms"] = None
         return
 
     while not stop_event.is_set():
         try:
             frames = pipeline.wait_for_frames(timeout_ms=2000)
-            aligned_frames = align.process(frames) if align is not None else frames
-
-            color_frame = aligned_frames.get_color_frame()
-            depth_frame = aligned_frames.get_depth_frame() if REALSENSE_ENABLE_DEPTH else None
-            ir_frame = aligned_frames.get_infrared_frame(1) if REALSENSE_ENABLE_IR else None
-
-            if color_frame and (depth_frame is not None or not REALSENSE_ENABLE_DEPTH):
-                rgb = np.asanyarray(color_frame.get_data()).copy()
-
-                depth_center = 0.0
-                if depth_frame is not None:
-                    # Read only center depth to avoid copying the whole depth map (~600KB/frame)
-                    w = depth_frame.get_width()
-                    h = depth_frame.get_height()
-                    depth_center = float(depth_frame.get_distance(w // 2, h // 2))
-
-                depth_colormap = None
-                if REALSENSE_ENABLE_DEPTH_PREVIEW and depth_frame is not None:
-                    try:
-                        depth_data = np.asanyarray(depth_frame.get_data()).copy()
-                        depth_mm = depth_data.astype(np.float32)
-                        vmax = np.percentile(depth_mm[depth_mm > 0], 95) if np.any(depth_mm > 0) else 1.0
-                        vmin = np.percentile(depth_mm[depth_mm > 0], 5) if np.any(depth_mm > 0) else 0.0
-                        if vmax <= vmin:
-                            vmax = vmin + 1.0
-                        norm = np.clip((depth_mm - vmin) / (vmax - vmin), 0.0, 1.0)
-                        depth_colormap = (255 * cv2.applyColorMap((255 * (1.0 - norm)).astype(np.uint8), cv2.COLORMAP_JET)).astype(np.uint8)
-                    except Exception:
-                        depth_colormap = None
-
-                ir_image = None
-                if REALSENSE_ENABLE_IR and ir_frame:
-                    try:
-                        ir_image = np.asanyarray(ir_frame.get_data()).copy()
-                        # IR is single-channel; keep as-is (uint8)
-                    except Exception:
-                        ir_image = None
-
-                with frame_lock:
-                    latest_frames["rgb"] = rgb
-                    latest_frames["rgb_seq"] += 1
-                    latest_frames["depth_center"] = depth_center
-                    latest_frames["ir"] = ir_image
-                    latest_frames["depth_map"] = depth_colormap
+            _update_video_frames(frames)
         except Exception as e:
             print(f"[RealSense Thread Error] {e}")
 
+
+def motion_worker():
+    if motion_pipeline is not None:
+        return
+    while not stop_event.is_set():
+        if motion_queue is None:
+            time.sleep(0.05)
+            continue
+        try:
+            frame = motion_queue.wait_for_frame(timeout_ms=1000)
+        except Exception:
+            continue
+
+        try:
+            if frame.is_motion_frame():
+                _update_motion_sample(frame)
+        except Exception:
+            continue
+
 def start_pipeline():
-    global pipeline, align, cap, gst_pipeline, gst_sink, csi_backend
+    global pipeline, align, pipeline_profile, motion_sensor, motion_queue, cap, gst_pipeline, gst_sink, csi_backend, REALSENSE_ENABLE_IMU
     
     if CAMERA_TYPE == "opencv":
         if cap is None:
@@ -333,23 +470,39 @@ def start_pipeline():
         if REALSENSE_ENABLE_IR:
             config.enable_stream(rs.stream.infrared, 1, 424, 240, rs.format.y8, 15)
 
-        pipeline.start(config)
+        pipeline_profile = pipeline.start(config)
 
         align = rs.align(rs.stream.color) if REALSENSE_ENABLE_DEPTH else None
+
+        if REALSENSE_ENABLE_IMU:
+            try:
+                _start_motion_streams(pipeline_profile.get_device())
+            except Exception as e:
+                REALSENSE_ENABLE_IMU = False
+                motion_sensor = None
+                motion_queue = None
+                print(f"[RealSense] IMU stream unavailable: {e}")
+
         enabled_streams = ["RGB"]
         if REALSENSE_ENABLE_DEPTH:
             enabled_streams.append("Depth")
         if REALSENSE_ENABLE_IR:
             enabled_streams.append("IR")
+        if REALSENSE_ENABLE_IMU:
+            enabled_streams.append("IMU")
         print("[RealSense] Pipeline started - %s ready" % " + ".join(enabled_streams))
         
         # Start background thread
         t = threading.Thread(target=camera_worker, daemon=True)
         t.start()
+        if REALSENSE_ENABLE_IMU and motion_queue is not None:
+            threading.Thread(target=motion_worker, daemon=True).start()
 
-def get_all_frames(copy_frames=True):
-    """Return a tuple (rgb, depth_center, ir_image, depth_map).
-    Any of the images may be None if they are not available yet.
+def get_all_frames(copy_frames=True, raw_depth=True):
+    """Return a tuple (rgb, depth_center, ir_image, depth_image).
+
+    `depth_image` is raw aligned uint16 depth in millimeters by default. Pass
+    `raw_depth=False` to request the colorized preview image instead.
     """
     start_pipeline()
     with frame_lock:
@@ -362,10 +515,46 @@ def get_all_frames(copy_frames=True):
             rgb = rgb.copy()
         if copy_frames and ir is not None:
             ir = ir.copy()
-        depth_map = latest_frames.get("depth_map")
-        if copy_frames and depth_map is not None:
-            depth_map = depth_map.copy()
-        return rgb, depth_center, ir, depth_map
+        depth_image = latest_frames.get("depth_raw" if raw_depth else "depth_preview")
+        if copy_frames and depth_image is not None:
+            depth_image = depth_image.copy()
+        return rgb, depth_center, ir, depth_image
+
+
+def get_sensor_packet(copy_frames=True, raw_depth=True):
+    start_pipeline()
+    with frame_lock:
+        if latest_frames["rgb"] is None:
+            return None
+
+        packet = {
+            "rgb": latest_frames["rgb"],
+            "rgb_seq": int(latest_frames.get("rgb_seq", 0) or 0),
+            "rgb_timestamp_ms": latest_frames.get("rgb_timestamp_ms"),
+            "depth_center": float(latest_frames.get("depth_center", 0.0) or 0.0),
+            "ir": latest_frames.get("ir"),
+            "ir_timestamp_ms": latest_frames.get("ir_timestamp_ms"),
+            "depth_image": latest_frames.get("depth_raw" if raw_depth else "depth_preview"),
+            "depth_timestamp_ms": latest_frames.get("depth_timestamp_ms"),
+            "accel": latest_frames.get("accel"),
+            "accel_timestamp_ms": latest_frames.get("accel_timestamp_ms"),
+            "gyro": latest_frames.get("gyro"),
+            "gyro_timestamp_ms": latest_frames.get("gyro_timestamp_ms"),
+        }
+
+        if copy_frames:
+            if packet["rgb"] is not None:
+                packet["rgb"] = packet["rgb"].copy()
+            if packet["ir"] is not None:
+                packet["ir"] = packet["ir"].copy()
+            if packet["depth_image"] is not None:
+                packet["depth_image"] = packet["depth_image"].copy()
+            if packet["accel"] is not None:
+                packet["accel"] = np.array(packet["accel"], copy=True)
+            if packet["gyro"] is not None:
+                packet["gyro"] = np.array(packet["gyro"], copy=True)
+
+        return packet
 
 
 def get_rgb_frame_and_seq(copy_frame=True):
@@ -379,7 +568,7 @@ def get_rgb_frame_and_seq(copy_frame=True):
         return rgb, int(latest_frames.get("rgb_seq", 0) or 0)
 
 def stop_pipeline():
-    global pipeline, align, cap, gst_pipeline, gst_sink, csi_backend
+    global pipeline, align, pipeline_profile, motion_pipeline, motion_sensor, motion_queue, cap, gst_pipeline, gst_sink, csi_backend
     stop_event.set()
     # Give the thread a moment to exit the loop
     time.sleep(0.5)
@@ -401,11 +590,29 @@ def stop_pipeline():
         return
 
     if pipeline:
+        if motion_pipeline is not None:
+            try:
+                motion_pipeline.stop()
+            except Exception:
+                pass
+            motion_pipeline = None
+        if motion_sensor is not None:
+            try:
+                motion_sensor.stop()
+            except Exception:
+                pass
+            try:
+                motion_sensor.close()
+            except Exception:
+                pass
+            motion_sensor = None
+            motion_queue = None
         try:
             pipeline.stop()
         except Exception as e:
             print(f"[RealSense] Error stopping pipeline: {e}")
         pipeline = None
+        pipeline_profile = None
         align = None
     print("[RealSense] Pipeline stopped.")
 
@@ -456,8 +663,21 @@ def save_ir_image(filename):
 
 # --------------------- DEPTH ---------------------
 def get_depth_image():
-    # Depth map is no longer stored to reduce CPU. Return None to indicate unavailable.
-    return None
+    start_pipeline()
+    with frame_lock:
+        depth = latest_frames.get("depth_raw")
+        if depth is None:
+            return None
+        return depth.copy()
+
+
+def get_depth_preview_image():
+    start_pipeline()
+    with frame_lock:
+        preview = latest_frames.get("depth_preview")
+        if preview is None:
+            return None
+        return preview.copy()
 
 
 def save_depth_image(filename, colored=True):
