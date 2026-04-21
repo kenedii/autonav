@@ -13,4 +13,5 @@ jetracer/train/runs_rgb_depth/
 .venv/
 venv/
 
-docs/
+docs/*
+!docs/final_presentation_status.md

@@ -31,6 +31,30 @@ The pipeline has been optimized for a **NVIDIA Jetson Nano** mounted on a **LaTr
 5. Optimize/deploy with `inference/README.md`.
 6. Run fleet workflows, manage cars from Fleet Management Frontend with `fleet/fleet_management_app/README.md`.
 
+## Final Presentation / Known-Good State
+
+This repository's known-good final presentation state is:
+
+- Git commit: `9db24f0778a5fc6e02ca1f3eb6a4681f8ced0b95`
+- Branch used for the final technical review: `main`
+- Validated live demo path: Jetson Nano + CAM0 + TensorRT + PCA9685 + `inference/run_autonomous_resnet.py`
+
+For a concise final-presentation summary, see [docs/final_presentation_status.md](docs/final_presentation_status.md).
+
+## Reproduce from GitHub
+
+Use this checklist to reproduce the project at a high level:
+
+1. Clone the repository.
+2. Set up the Jetson environment from `setup/README.md`.
+3. Download the model weights and place them in the expected `checkpoints/` path.
+4. Verify camera, controller, and motor-control hardware using `tests/README.md`.
+5. Collect data with the recorder scripts in `data_collection/`.
+6. Train/evaluate a model with `model_training/`.
+7. Optimize the selected checkpoint with TensorRT from `inference/`.
+8. Run the validated live Jetson demo command below.
+9. Launch the fleet dashboard/client if needed.
+10. Run the targeted regression/API tests listed in `Run the Tests`.
 
 ## Hardware
 
@@ -72,6 +96,32 @@ When recording with `--camera realsense --record_mode all`, `depth_path` stores 
 - Jetpack 4.6.1 SDK
 - Python 3.6.9
 
+## Known-Good Platform
+
+The final presentation validation path was exercised on:
+
+- Ubuntu `18.04.6`
+- JetPack `4.6.1`
+- Python `3.6.9`
+- Jetson Nano `4GB`
+- CAM0 primary RGB input
+- PCA9685 motor control over I2C
+- Intel RealSense D435i as a sidecar / experimental RGB-D/IMU path
+
+## Feature Status
+
+- Lane following: validated live demo path
+  - Primary path is CAM0 + AutoNav-v2-34 + TensorRT + PCA9685 + `inference/run_autonomous_resnet.py`
+- YOLO: prototype / advisory only
+  - Detection path exists in the fleet runtime
+  - Not part of the validated live Jetson control loop
+- SLAM: experimental RGB-D odometry / replay only
+  - Replay and pose-estimation evidence exists
+  - This is not full production SLAM and is not the validated live demo path
+- Depth stop: subsystem / prototype only
+  - RealSense depth utilities exist
+  - This should not be presented as a validated final live-demo safety feature unless re-tested separately
+
 ## Core Features
 
 - Data collection from teleoperated driving
@@ -108,6 +158,16 @@ Experiment 5 and 6 are identical to 1 and 2 respectively, these were just create
 
 Several pre-trained models are available [from our Huggingface repository](https://huggingface.co/everestt/autonav/tree/main).
 
+The validated final Jetson demo path expects the AutoNav v2 checkpoint at:
+
+`checkpoints/AutoNav-v2/AutoNav-v2-34/AutoNav-v2-34.pth`
+
+Direct Hugging Face path for that checkpoint family:
+
+`https://huggingface.co/everestt/autonav/tree/main/AutoNav-v2/AutoNav-v2-34`
+
+Model weights are not committed to Git in this repository. Download them separately and place them at the expected local destination above.
+
 The pre-trained AutoNav Models we have available are:
 - AutoNav v1 (Best model: AutoNav-v1-34: Steering Pseudo Accuracy of 72.70%)
   - Predicts normalized steering value from RGB image
@@ -116,10 +176,78 @@ The pre-trained AutoNav Models we have available are:
 
 The Steering Pseudo Accuracy evaluation metric sorts validation images into [Left, Centre, Right] bins and evaluates accuracy to predict a normalized steering value within the correct bin.
 
+The pseudo-accuracy values above are historical reported metrics from project training runs. If you are presenting or reproducing the repo from GitHub, treat them as reported results unless you also regenerate the supporting training artifacts locally.
+
 Some model training runs were done with a capped throttle value for safety reasons, so it may not predict high throttle values. To convert the normalized throttle prediction from the model output to a [-1.0, 1.0] range, apply the formula: 
 - **new_norm_throttle = max(-1.0, min(1.0, model_output × 3.33))**
 
 *Note: Our pretrained steering models predict +1.0 for left and -1.0 for right. The output value may need to be inverted (multiply by -1) depending on the car motor driver module.*
+
+## Validated Jetson Live Demo Command
+
+This is the primary validated final-presentation live-demo path:
+
+```bash
+python3 inference/run_autonomous_resnet.py \
+  --arch resnet34 \
+  --exp 3 \
+  --camera cam0 \
+  --cam-backend argus \
+  --cam-sensor-id 0 \
+  --controller-backend pca9685 \
+  --model-path checkpoints/AutoNav-v2/AutoNav-v2-34/AutoNav-v2-34.pth \
+  --trt-model-path inference/best_model_trt.pth \
+  --throttle 0.20 \
+  --no-invert-steering \
+  --debug-timings
+```
+
+This command reflects the final presentation state:
+
+- CAM0 is the primary forward RGB source
+- AutoNav-v2-34 / ResNet34 is the active control model
+- TensorRT is the validated Jetson optimization path
+- PCA9685 is the validated motor-control path
+- RealSense is not required for the core live lane-following demo
+
+## Run the Tests
+
+The following targeted test commands were used in the final technical review:
+
+```bash
+# AutoNav v2 model/runtime loading checks
+pytest fleet/fleet_management_app/client_api/test_autonav_v2.py -q
+
+# SLAM core and replay checks
+pytest tests/test_slam_core.py tests/test_slam_replay.py -q
+
+# Fleet API tests
+PYTHONPATH=fleet/fleet_management_app/client_api:fleet/fleet_management_app/host_app pytest tests/test_server.py tests/test_client.py -q
+
+# Mission-state tests
+PYTHONPATH=fleet/fleet_management_app/client_api pytest tests/test_mission.py -q
+
+# Preprocess/profile tests
+PYTHONPATH=data_collection pytest tests/test_preprocess_utils.py -q
+```
+
+Known limitation:
+
+- `tests/test_runtime_split.py` reflects an older runtime split and was stale against the final reviewed repo state. Do not present it as part of the passing final validation set unless you update it separately.
+
+## Team Contributions
+
+This project has two members:
+
+- Nicolas Maitland
+- Chris Kenedi / `kenedii`
+
+For the final presentation, contributions should be described by subsystem familiarity rather than exclusive authorship. The Git history is mixed across shared files, so the safest summary is:
+
+- Nicolas Maitland: primary familiarity with Jetson integration, final live-demo validation, AutoNav v2 runtime bring-up, and final presentation/reproducibility preparation
+- Chris Kenedi / `kenedii`: major contributor to the shared project codebase, fleet/dashboard architecture, and overall repository foundation
+
+During code review, present ownership by module familiarity rather than claiming strict one-person ownership of every file.
 
 ## Demos 
 
