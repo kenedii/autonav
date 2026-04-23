@@ -143,7 +143,7 @@ The project defines multiple model variants through a list called EXPERIMENTS. T
     {"id": 6, "desc": "Front+Back RGB only (Cleaned)",        "csv": CLEANED_CSV,   "features": ['rgb_path', 'cam1_path']}
 ]
 ```
-Experiment 5 and 6 are identical to 1 and 2 respectively, these were just created these to do a training run with non-augmented images only, so they can be ignored. (Using no augmented images performs much worse)
+Experiment 5 and 6 are identical to 1 and 4 respectively, these were just created these to do a training run with non-augmented images only, so they can be ignored. (Using no augmented images performs much worse)
 
 - rgb_path: Front camera on vehicle
 - cam1_path: Back camera on vehicle
