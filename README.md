@@ -177,6 +177,16 @@ Some model training runs were done with a capped throttle value for safety reaso
 
 *Note: Our pretrained steering models predict +1.0 for left and -1.0 for right. The output value may need to be inverted (multiply by -1) depending on the car motor driver module.*
 
+## Demos 
+
+### Training Data Example (Post-Augmentations)
+<img width="1650" height="560" alt="augmented_data_train_samples_by_source_examples" src="https://github.com/user-attachments/assets/5bdd33dd-3efb-4e96-9a43-299e4e838777" />
+The images from the top dataset are used in AutoNav v1 Models only.
+
+### AutoNav V1 Live Demo
+
+https://github.com/user-attachments/assets/af635698-d848-48ed-9db1-3eb8aa4ac871
+
 ## Run the Tests
 
 The following targeted test commands were used in the final technical review:
@@ -197,16 +207,6 @@ PYTHONPATH=fleet/fleet_management_app/client_api pytest tests/test_mission.py -q
 # Preprocess/profile tests
 PYTHONPATH=data_collection pytest tests/test_preprocess_utils.py -q
 ```
-
-## Demos 
-
-### Training Data Example (Post-Augmentations)
-<img width="1650" height="560" alt="augmented_data_train_samples_by_source_examples" src="https://github.com/user-attachments/assets/5bdd33dd-3efb-4e96-9a43-299e4e838777" />
-The images from the top dataset are used in AutoNav v1 Models only.
-
-### AutoNav V1 Live Demo
-
-https://github.com/user-attachments/assets/af635698-d848-48ed-9db1-3eb8aa4ac871
 
 ## Troubleshooting
 
