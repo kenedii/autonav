@@ -31,15 +31,37 @@ The pipeline has been optimized for a **NVIDIA Jetson Nano** mounted on a **LaTr
 5. Optimize/deploy with `inference/README.md`.
 6. Run fleet workflows, manage cars from Fleet Management Frontend with `fleet/fleet_management_app/README.md`.
 
-## Final Presentation / Known-Good State
+Example command:
 
-This repository's known-good final presentation state is:
+```bash
+python3 inference/run_autonomous_resnet.py \
+  --arch resnet34 \
+  --exp 3 \
+  --camera cam0 \
+  --cam-backend argus \
+  --cam-sensor-id 0 \
+  --controller-backend pca9685 \
+  --model-path checkpoints/AutoNav-v2/AutoNav-v2-34/AutoNav-v2-34.pth \
+  --trt-model-path inference/best_model_trt.pth \
+  --throttle 0.20 \
+  --no-invert-steering \
+  --debug-timings
+```
 
-- Git commit: `9db24f0778a5fc6e02ca1f3eb6a4681f8ced0b95`
-- Branch used for the final technical review: `main`
-- Validated live demo path: Jetson Nano + CAM0 + TensorRT + PCA9685 + `inference/run_autonomous_resnet.py`
+## Prototype features
 
-For a concise final-presentation summary, see [docs/final_presentation_status.md](docs/final_presentation_status.md).
+- YOLO
+  - Prototype only
+  - Advisory detection only
+  - Not part of the validated live Jetson control loop
+
+- SLAM
+  - Experimental RGB-D odometry / replay path
+  - Not full production SLAM
+  - Not the validated live demo path
+
+- Depth stop
+  - Subsystem / prototype only
 
 ## Reproduce from GitHub
 
