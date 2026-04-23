@@ -239,17 +239,17 @@ Known limitation:
 
 This project has two members:
 
-- Nick
-- Chris
+- Nicolas Maitland
+- Chris Kenedi / `kenedii`
 
 For the final presentation, contributions should be described by subsystem familiarity rather than exclusive authorship. The Git history is mixed across shared files, so the safest summary is:
 
-- Nick
+- Nicolas Maitland
   - hardware / Jetson integration
   - Jetson-side runtime bring-up and live-demo validation
-  - familiarity with the Jetson-side prototype/runtime integrations used during final testing
+  - familiarity with the Jetson-side YOLO and SLAM / RGB-D odometry prototype work used during final testing
 
-- Chris
+- Chris Kenedi / `kenedii`
   - model training workflow
   - dashboard / API and broader shared codebase implementation
   - major contributor to the repository foundation

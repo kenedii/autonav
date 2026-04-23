@@ -13,5 +13,15 @@ jetracer/train/runs_rgb_depth/
 .venv/
 venv/
 
+# Local demo/runtime artifacts
+_vendor/
+checkpoints/
+cam0_snapshot.png
+cam0_model_view_160x120.png
+cam0_model_view_preview.png
+
 docs/*
 !docs/final_presentation_status.md
+!docs/final_artifacts/
+!docs/final_artifacts/**
+docs/final_artifacts/yolo/Ultralytics/

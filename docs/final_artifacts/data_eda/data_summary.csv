@@ -1,0 +1,46 @@
+category,metric,value,notes
+summary,run_folders,17,run_* folders under jetracer/train/runs_rgb_depth
+summary,dataset_csv_files,17,dataset.csv files discovered
+summary,total_raw_rows,9536,non-header rows across all dataset.csv files
+summary,non_empty_runs,16,runs with at least one labeled row
+summary,empty_runs,1,run_20260401_234117
+split,experiment_train_val_test,70/15/15,model_training/train_model_experiments.py
+split,legacy_train_test,80/20,model_training/train_model_resnet.py
+steering,left_rows,1033,value < -0.15
+steering,center_rows,6280,-0.15 <= value <= 0.15
+steering,right_rows,2222,value > 0.15
+throttle,reverse_rows,1290,value < 0
+throttle,zero_rows,3152,value == 0
+throttle,forward_rows,5093,value > 0
+sensor,rgb_path_present_rows,9535,
+sensor,rgb_path_missing_rows,1,
+sensor,cam0_path_present_rows,9535,
+sensor,cam0_path_missing_rows,1,
+sensor,cam1_path_present_rows,9035,
+sensor,cam1_path_missing_rows,501,
+sensor,ir_path_present_rows,9035,
+sensor,ir_path_missing_rows,501,
+sensor,depth_path_present_rows,9035,
+sensor,depth_path_missing_rows,501,
+sensor,realsense_rgb_path_present_rows,0,
+sensor,realsense_rgb_path_missing_rows,9536,
+sensor,depth_front_present_rows,9535,
+sensor,depth_front_missing_rows,1,
+sensor,accel_x_present_rows,0,
+sensor,accel_x_missing_rows,9536,
+sensor,accel_y_present_rows,0,
+sensor,accel_y_missing_rows,9536,
+sensor,accel_z_present_rows,0,
+sensor,accel_z_missing_rows,9536,
+sensor,accel_ts_ms_present_rows,0,
+sensor,accel_ts_ms_missing_rows,9536,
+sensor,gyro_x_present_rows,0,
+sensor,gyro_x_missing_rows,9536,
+sensor,gyro_y_present_rows,0,
+sensor,gyro_y_missing_rows,9536,
+sensor,gyro_z_present_rows,0,
+sensor,gyro_z_missing_rows,9536,
+sensor,gyro_ts_ms_present_rows,0,
+sensor,gyro_ts_ms_missing_rows,9536,
+sensor,imu_accel_rows,0,rows with any accel field populated
+sensor,imu_gyro_rows,0,rows with any gyro field populated

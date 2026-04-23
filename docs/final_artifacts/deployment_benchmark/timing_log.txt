@@ -1,0 +1,30 @@
+Manual procedure only: no live Jetson benchmark run was executed in this pass.
+
+Exact benchmark command to run on Jetson:
+python3 inference/run_autonomous_resnet.py \
+  --arch resnet34 \
+  --exp 3 \
+  --camera cam0 \
+  --cam-backend argus \
+  --cam-sensor-id 0 \
+  --controller-backend pca9685 \
+  --model-path checkpoints/AutoNav-v2/AutoNav-v2-34/AutoNav-v2-34.pth \
+  --trt-model-path inference/best_model_trt.pth \
+  --throttle 0.20 \
+  --no-invert-steering \
+  --debug-timings
+
+Preflight observations from the current environment:
+- uname exit code: 0
+- uname -a: Darwin Nicolass-MacBook-Pro-2.local 24.6.0 Darwin Kernel Version 24.6.0: Mon Jul 14 11:30:29 PDT 2025; root:xnu-11417.140.69~1/RELEASE_ARM64_T6000 arm64
+- python executable: /Users/nicolasmaitland/anaconda3/bin/python3
+- python version: 3.11.5
+- checkpoint present: yes (checkpoints/AutoNav-v2/AutoNav-v2-34/AutoNav-v2-34.pth)
+- TensorRT engine present: no (inference/best_model_trt.pth)
+- tegrastats present: no
+- /etc/nv_tegra_release present: no
+
+Why no benchmark was run:
+- The current host is not the Jetson Nano presentation target.
+- The validated command depends on CAM0 + Argus + PCA9685 hardware access.
+- The expected TensorRT engine file is not present in this local repo snapshot.

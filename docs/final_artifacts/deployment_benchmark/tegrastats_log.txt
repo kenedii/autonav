@@ -1,0 +1,8 @@
+Manual procedure only: tegrastats was not captured in this pass.
+
+- tegrastats path: not found
+- /etc/nv_tegra_release present: no
+- Required Jetson capture command:
+  sudo tegrastats --interval 1000
+- Recommended capture window:
+  start tegrastats, run the validated live command for 30-60 seconds, then stop tegrastats and save the output here.

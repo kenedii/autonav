@@ -1,0 +1,14 @@
+category,command,result,pass_fail,what_it_proves,notes
+git,git branch --show-current,main,pass,Current working branch at start of evidence pass,
+git,git rev-parse HEAD,28099c4efeaf6359a441c812a47e6bbd3b8e1e73,pass,Exact repo revision used for this evidence pack,
+git,git log --oneline -5,"28099c4 Use first names in presentation docs | 75c0a2a Update final presentation documentation | 9db24f0 Expand RealSense RGB-D/IMU capture and SLAM replay | fb8255b Add AutoNav v2 Jetson runtime support | e930cb3 Clarify MLP Regressor details in README",pass,Recent repo history,
+git,git status --short,"M .gitignore | ?? tests/test_yolo_wrapper.py",pass,Working tree state captured at start of pass,Start-of-pass snapshot
+tests,pytest fleet/fleet_management_app/client_api/test_autonav_v2.py -q,5 passed in 2.00s,pass,AutoNav v2 model/runtime loading helpers are stable,
+tests,pytest tests/test_slam_core.py tests/test_slam_replay.py -q,4 passed in 0.24s,pass,SLAM math and replay-path tests are stable,
+tests,PYTHONPATH=fleet/fleet_management_app/client_api:fleet/fleet_management_app/host_app pytest tests/test_server.py tests/test_client.py -q,8 passed in 0.64s,pass,Fleet API and proxy behavior are stable,
+tests,PYTHONPATH=fleet/fleet_management_app/client_api pytest tests/test_mission.py -q,7 passed in 0.01s,pass,Mission/depth-stop helper logic is stable,
+tests,PYTHONPATH=data_collection pytest tests/test_preprocess_utils.py -q,1 passed in 0.19s,pass,Preprocess-profile logic is stable,
+tests,pytest tests/test_data_pipeline_metadata.py -q,collection error,fail,Data metadata suite is not green in current host environment,"ModuleNotFoundError on jetracer.train.data_frontend.augment_data plus pandas/pyarrow/NumPy compatibility errors"
+tests,PYTHONPATH=. pytest tests/test_data_pipeline_metadata.py -q,collection error,fail,Confirms simple PYTHONPATH adjustment does not recover the metadata suite,Same failure mode
+tests,PYTHONPATH=fleet/fleet_management_app/client_api:data_collection pytest tests/test_runtime_split.py -q,11 failed 2 passed in 0.24s,fail,Runtime-split suite is stale against current hardware/runtime API,"Missing hardware module APIs such as resolve_sensor_role_configs empty_sensor_snapshot CompositeSensorRig build_sensor_rig"
+syntax,python3 -m py_compile data_collection/record_data3.py data_collection/realsense_full.py data_collection/preprocess_utils.py model_training/train_model_experiments.py model_training/train_model_resnet.py model_training/dataset_loader.py inference/run_autonomous_resnet.py inference/trt_optimize.py fleet/fleet_management_app/client_api/car.py fleet/fleet_management_app/client_api/hardware.py fleet/fleet_management_app/client_api/main.py fleet/fleet_management_app/client_api/mission.py fleet/fleet_management_app/client_api/models.py fleet/fleet_management_app/client_api/slam.py fleet/fleet_management_app/host_app/server.py,no output,pass,Key code paths are syntactically valid,
