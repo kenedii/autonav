@@ -70,6 +70,8 @@
                         <div class="client-tabs-nav">
                             <button class="client-tab-btn active" data-client-tab="overview">Overview</button>
                             <button class="client-tab-btn" data-client-tab="deploy">Control Model</button>
+                            <button class="client-tab-btn" data-client-tab="yolo">YOLO</button>
+                            <button class="client-tab-btn" data-client-tab="slam">SLAM</button>
                             <button class="client-tab-btn" data-client-tab="optimize">Optimize Model</button>
                             <button class="client-tab-btn" data-client-tab="video">Live Feed</button>
                             <button class="client-tab-btn" data-client-tab="logs">Logs</button>
@@ -150,6 +152,22 @@
                                         </div>
 
                                         <div class="form-row">
+                                            <label for="deploy-runtime-device">Runtime Device</label>
+                                            <select id="deploy-runtime-device">
+                                                <option value="cuda">CUDA / CPU Runtime</option>
+                                                <option value="rknn">RKNN Runtime</option>
+                                            </select>
+                                        </div>
+
+                                        <div class="form-row">
+                                            <label for="deploy-controller-backend">Motor Controller</label>
+                                            <select id="deploy-controller-backend">
+                                                <option value="pca9685">PCA9685 (Jetson)</option>
+                                                <option value="pico">Pi Pico (serial)</option>
+                                            </select>
+                                        </div>
+
+                                        <div class="form-row">
                                             <label for="deploy-model-file">Upload Model</label>
                                             <input id="deploy-model-file" type="file" accept=".pth,.pt,.rknn,.bin,.onnx">
                                         </div>
@@ -190,6 +208,8 @@
                                         <div class="checkbox-row">
                                             <label><input id="use-depth" type="checkbox" checked> Use RealSense depth as model input</label>
                                             <label><input id="use-ir" type="checkbox" checked> Use RealSense IR as model input</label>
+                                            <label><input id="enable-yolo" type="checkbox" checked> Enable YOLO loop</label>
+                                            <label><input id="enable-slam" type="checkbox"> Enable SLAM loop</label>
                                         </div>
                                     </div>
                                 </div>
@@ -201,6 +221,95 @@
 
                                 <button class="btn-primary" id="deploy-model-btn">Deploy Control Model</button>
                                 <pre id="deploy-result" class="mono-block"></pre>
+                            </div>
+                        </div>
+
+                        <div id="client-tab-yolo" class="client-tab-pane">
+                            <div class="panel-card">
+                                <h3>YOLO Control</h3>
+                                <p class="subtle">Enable detection, replace the model, tune thresholds, and export detections.</p>
+                                <div class="grid-two">
+                                    <div>
+                                        <div class="form-row">
+                                            <label><input id="yolo-enabled" type="checkbox"> Detection Enabled</label>
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="yolo-conf">Confidence Threshold</label>
+                                            <input id="yolo-conf" type="number" value="0.25" step="0.01" min="0" max="1">
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="yolo-iou">IoU Threshold</label>
+                                            <input id="yolo-iou" type="number" value="0.45" step="0.01" min="0" max="1">
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="yolo-max-det">Max Detections</label>
+                                            <input id="yolo-max-det" type="number" value="100" min="1" step="1">
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="yolo-model-file">Replace YOLO Model</label>
+                                            <input id="yolo-model-file" type="file" accept=".pt,.onnx,.engine">
+                                        </div>
+                                        <div class="btn-row">
+                                            <button class="btn-secondary" id="yolo-upload-btn">Upload YOLO Model</button>
+                                            <span id="yolo-upload-state" class="inline-note">No model uploaded</span>
+                                        </div>
+                                        <div class="btn-row">
+                                            <button class="btn-primary" id="yolo-apply-btn">Apply YOLO Settings</button>
+                                            <button class="btn-secondary" id="yolo-refresh-btn">Refresh Detections</button>
+                                        </div>
+                                        <div class="btn-row">
+                                            <button class="btn-secondary" id="yolo-clear-btn">Clear Detections</button>
+                                            <button class="btn-success" id="yolo-download-btn">Download Detections</button>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <h4>Detections</h4>
+                                        <pre id="yolo-result" class="mono-block">No detections yet.</pre>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="client-tab-slam" class="client-tab-pane">
+                            <div class="panel-card">
+                                <h3>SLAM Control</h3>
+                                <p class="subtle">Enable SLAM, reset map state, send navigation goals, and export map trajectory.</p>
+                                <div class="grid-two">
+                                    <div>
+                                        <div class="form-row">
+                                            <label><input id="slam-enabled" type="checkbox"> SLAM Enabled</label>
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="slam-nav-kp">Navigation Kp</label>
+                                            <input id="slam-nav-kp" type="number" value="2.0" step="0.1" min="0">
+                                        </div>
+                                        <div class="btn-row">
+                                            <button class="btn-primary" id="slam-apply-btn">Apply SLAM Settings</button>
+                                            <button class="btn-secondary" id="slam-refresh-btn">Refresh Map</button>
+                                        </div>
+                                        <div class="btn-row">
+                                            <button class="btn-warning" id="slam-reset-btn">Reset Map</button>
+                                            <button class="btn-success" id="slam-download-btn">Download Map</button>
+                                        </div>
+                                        <h4>Navigation Target</h4>
+                                        <div class="form-row">
+                                            <label for="slam-target-x">Target X (m)</label>
+                                            <input id="slam-target-x" type="number" value="0" step="0.1">
+                                        </div>
+                                        <div class="form-row">
+                                            <label for="slam-target-y">Target Y (m)</label>
+                                            <input id="slam-target-y" type="number" value="0" step="0.1">
+                                        </div>
+                                        <div class="btn-row">
+                                            <button class="btn-primary" id="slam-go-btn">Drive To Target</button>
+                                            <button class="btn-danger-outline" id="slam-cancel-nav-btn">Cancel Navigation</button>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <h4>Map and Pose</h4>
+                                        <pre id="slam-result" class="mono-block">No map yet.</pre>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Body, WebSocket, WebSocketDisconnect, Depends, Header, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uvicorn
@@ -134,9 +134,20 @@ class ClientConfig(BaseModel):
     device: str = 'cuda'
     architecture: str = 'resnet18'
     cameras: List[CameraConfig] = []
+    controller_backend: str = 'pico'
+    serial_port: Optional[str] = None
+    serial_baud: int = 115200
+    pca_bus: int = 1
+    pca_address: int = 0x40
     control_model_type: str = 'pytorch'
     control_model: str
     detection_model: str
+    yolo_enabled: bool = True
+    yolo_confidence_threshold: float = 0.25
+    yolo_iou_threshold: float = 0.45
+    yolo_max_detections: int = 100
+    slam_enabled: bool = False
+    nav_kp: float = 2.0
     throttle_mode: str = 'fixed' # 'fixed' or 'ai'
     fixed_throttle_value: float = 0.22
     invert_steering: Optional[bool] = None
@@ -159,6 +170,19 @@ class UpdateSettingsRequest(BaseModel):
 class NavigateRequest(BaseModel):
     x: float
     y: float
+
+
+class YoloConfigRequest(BaseModel):
+    enabled: Optional[bool] = None
+    model_path: Optional[str] = None
+    conf_threshold: Optional[float] = None
+    iou_threshold: Optional[float] = None
+    max_detections: Optional[int] = None
+
+
+class SlamConfigRequest(BaseModel):
+    enabled: Optional[bool] = None
+    nav_kp: Optional[float] = None
 
 class TrtOptimizeRequest(BaseModel):
     experiment: int
@@ -250,13 +274,75 @@ def resume_car(_: None = Depends(_verify_api_key)):
 @app.post("/navigate")
 def set_destination(req: NavigateRequest, _: None = Depends(_verify_api_key)):
     """Override control to navigate to a specific generic coordinate [x, y]"""
-    car.target_dest = (req.x, req.y)
-    return {"status": "navigating", "target": car.target_dest}
+    car.set_navigation_target(req.x, req.y)
+    return {"status": "navigating", "target": {"x": req.x, "y": req.y}}
 
 @app.post("/navigate/cancel")
 def cancel_navigation(_: None = Depends(_verify_api_key)):
-    car.target_dest = None
+    car.cancel_navigation()
     return {"status": "cancelled"}
+
+
+@app.post("/yolo/config")
+def configure_yolo(req: YoloConfigRequest, _: None = Depends(_verify_api_key)):
+    result = car.configure_yolo(
+        enabled=req.enabled,
+        model_path=req.model_path,
+        conf_threshold=req.conf_threshold,
+        iou_threshold=req.iou_threshold,
+        max_detections=req.max_detections,
+    )
+    return {"status": "updated", **result}
+
+
+@app.get("/yolo/detections")
+def get_yolo_detections(limit: int = 200, _: None = Depends(_verify_api_key)):
+    history = car.get_detection_history(limit=limit)
+    return {
+        "status": "ok",
+        "latest": car.state.get("detections", []),
+        "history": history,
+    }
+
+
+@app.delete("/yolo/detections")
+def clear_yolo_detections(_: None = Depends(_verify_api_key)):
+    car.clear_detection_history()
+    car.state["detections"] = []
+    car.state["detection_count"] = 0
+    return {"status": "cleared"}
+
+
+@app.get("/yolo/detections/download")
+def download_yolo_detections(_: None = Depends(_verify_api_key)):
+    payload = {
+        "latest": car.state.get("detections", []),
+        "history": car.get_detection_history(limit=car.max_detection_history),
+    }
+    return JSONResponse(content=payload)
+
+
+@app.post("/slam/config")
+def configure_slam(req: SlamConfigRequest, _: None = Depends(_verify_api_key)):
+    result = car.configure_slam(enabled=req.enabled, nav_kp=req.nav_kp)
+    return {"status": "updated", **result}
+
+
+@app.post("/slam/reset")
+def reset_slam(_: None = Depends(_verify_api_key)):
+    if not car.reset_slam():
+        raise HTTPException(status_code=400, detail="SLAM is not enabled")
+    return {"status": "reset", "map": car.get_slam_map()}
+
+
+@app.get("/slam/map")
+def get_slam_map(_: None = Depends(_verify_api_key)):
+    return {"status": "ok", "map": car.get_slam_map()}
+
+
+@app.get("/slam/map/download")
+def download_slam_map(_: None = Depends(_verify_api_key)):
+    return JSONResponse(content=car.get_slam_map())
 
 @app.get("/experiments")
 def get_experiments(_: None = Depends(_verify_api_key)):
@@ -573,6 +659,35 @@ async def websocket_loop(host_ip: str, client_name: str = "Jetson"):
                                 car.fixed_throttle = cmd["fixed_throttle_value"]
                         elif action == "configure":
                             threading.Thread(target=car.configure, args=(cmd,)).start()
+                        elif action == "yolo/config":
+                            threading.Thread(
+                                target=car.configure_yolo,
+                                kwargs={
+                                    "enabled": cmd.get("enabled"),
+                                    "model_path": cmd.get("model_path"),
+                                    "conf_threshold": cmd.get("conf_threshold"),
+                                    "iou_threshold": cmd.get("iou_threshold"),
+                                    "max_detections": cmd.get("max_detections"),
+                                },
+                            ).start()
+                        elif action == "yolo/clear":
+                            car.clear_detection_history()
+                            car.state["detections"] = []
+                            car.state["detection_count"] = 0
+                        elif action == "slam/config":
+                            threading.Thread(
+                                target=car.configure_slam,
+                                kwargs={
+                                    "enabled": cmd.get("enabled"),
+                                    "nav_kp": cmd.get("nav_kp"),
+                                },
+                            ).start()
+                        elif action == "slam/reset":
+                            car.reset_slam()
+                        elif action == "navigate":
+                            car.set_navigation_target(cmd.get("x", 0.0), cmd.get("y", 0.0))
+                        elif action == "navigate/cancel":
+                            car.cancel_navigation()
 
                 except websockets.ConnectionClosed:
                     print("[WS] Connection lost.")

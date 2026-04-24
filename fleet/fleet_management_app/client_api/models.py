@@ -314,27 +314,40 @@ class AutonomousDriver:
 class ObjectDetector:
     def __init__(self, config):
         self.model_path = config.get('detection_model')
+        self.conf_threshold = float(config.get('yolo_confidence_threshold', 0.25))
+        self.iou_threshold = float(config.get('yolo_iou_threshold', 0.45))
+        self.max_detections = int(config.get('yolo_max_detections', 100))
         # Placeholder for YOLOv8
         # In a real scenario, we might use 'ultralytics'
         self.model = None
+        self.class_names = {}
         try:
             from ultralytics import YOLO
             if os.path.exists(self.model_path):
                 self.model = YOLO(self.model_path)
+                self.class_names = dict(getattr(self.model.model, "names", {}))
         except ImportError:
             print("Ultralytics YOLO not installed, detection will be dummy.")
 
     def detect(self, frame):
         if self.model:
-            results = self.model(frame, verbose=False)
+            results = self.model(
+                frame,
+                verbose=False,
+                conf=self.conf_threshold,
+                iou=self.iou_threshold,
+                max_det=self.max_detections,
+            )
             # Process results to return standard format
             # e.g. list of {"class": "stop_sign", "bbox": [x1, y1, x2, y2], "conf": 0.9}
             detections = []
             for result in results:
                 boxes = result.boxes
                 for box in boxes:
+                    class_id = int(box.cls[0].item())
                     detections.append({
-                        "class": int(box.cls[0].item()),
+                        "class": class_id,
+                        "label": self.class_names.get(class_id, str(class_id)),
                         "bbox": box.xyxy[0].tolist(),
                         "conf": box.conf[0].item()
                     })

@@ -11,6 +11,11 @@ try:
 except ImportError:
     serial = None
 
+try:
+    from smbus2 import SMBus
+except ImportError:
+    SMBus = None
+
 # Try importing pyrealsense2, handle if missing
 try:
     import pyrealsense2 as rs
@@ -59,6 +64,45 @@ class PicoSerialController:
     def __del__(self):
         self.close()
 
+
+class PCA9685Controller:
+    """Control steering/throttle through PCA9685 on I2C (Jetson-friendly path)."""
+
+    def __init__(self, bus_num=1, address=0x40):
+        if SMBus is None:
+            raise RuntimeError("smbus2 is required for PCA9685 control")
+        self.address = int(address)
+        self.bus = SMBus(int(bus_num))
+        self._set_pwm_freq(50)
+
+    def _set_pwm_freq(self, freq_hz):
+        prescaleval = 25000000.0 / 4096.0 / float(freq_hz) - 1.0
+        prescale = int(prescaleval + 0.5)
+        self.bus.write_byte_data(self.address, 0x00, 0x10)
+        self.bus.write_byte_data(self.address, 0xFE, prescale)
+        self.bus.write_byte_data(self.address, 0x00, 0xA1)
+
+    def set_us(self, channel, microseconds):
+        pulse_length = 1000000.0 / 50.0 / 4096.0
+        pulse = int(float(microseconds) / pulse_length)
+        base_reg = 0x06 + 4 * int(channel)
+        self.bus.write_i2c_block_data(
+            self.address,
+            base_reg,
+            [
+                0,
+                0,
+                pulse & 0xFF,
+                (pulse >> 8) & 0xFF,
+            ],
+        )
+
+    def close(self):
+        try:
+            self.bus.close()
+        except Exception:
+            pass
+
 def get_cpu_ram_info():
     try:
         # Simple linux commands
@@ -73,18 +117,27 @@ def get_cpu_ram_info():
         
     return f"{cpu_info} / {mem_info}"
 
-def get_system_specs(cameras=[]):
+def get_system_specs(cameras=None, config=None):
     """
     Gather hardware specs.
     cameras: list of camera objects or configs
     """
+    cameras = cameras or []
+    config = config or {}
+    inference_backend = "CUDA (GPU)" if cv2.cuda.getCudaEnabledDeviceCount() > 0 else "CPU"
+    runtime_backend = str(config.get("device", "cuda")).lower()
+    model_backend = str(config.get("control_model_type", "pytorch")).lower()
+    if runtime_backend == "rknn" or model_backend == "rockchip":
+        inference_backend = "RKNN (NPU)"
+
     specs = {
         "device": f"{platform.system()} {platform.release()}",
         "cpu_ram": get_cpu_ram_info(),
         "cameras": [],
-        "inference": "CUDA (GPU)" if cv2.cuda.getCudaEnabledDeviceCount() > 0 else "CPU",
+        "inference": inference_backend,
         "resnet_version": "ResNet-101 (Default)",
-        "yolo_version": "YOLOv8n (Default)"
+        "yolo_version": "YOLOv8n (Default)",
+        "controller_backend": str(config.get("controller_backend", "pico")).lower(),
     }
     
     # Process cameras
@@ -273,9 +326,15 @@ def get_camera(config, enable_depth=True):
             height=config.get("height", 480),
             fps=config.get("fps", 30)
         )
-        return OpenCVCamera(
-            index=config.get("index", 0),
-            width=config.get("width", 640),
-            height=config.get("height", 480),
-            fps=config.get("fps", 30)
-        )
+
+
+def get_motor_controller(config):
+    backend = str(config.get("controller_backend", "pico")).lower()
+    if backend == "pca9685":
+        bus_num = int(config.get("pca_bus", 1))
+        address = int(config.get("pca_address", 0x40))
+        return PCA9685Controller(bus_num=bus_num, address=address)
+
+    serial_port = config.get("serial_port")
+    serial_baud = int(config.get("serial_baud", 115200))
+    return PicoSerialController(port=serial_port, baudrate=serial_baud)
