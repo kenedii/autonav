@@ -24,7 +24,8 @@ python3 inference/run_autonomous_resnet.py \
 - This artifact set includes procedure and environment notes.
 - Live Jetson benchmark collection should be executed on the target hardware with `tegrastats` and runtime timing logs.
 
-![Runtime frame example](cam0_runtime_frame.png)
+<img width="640" height="480" alt="cam0_runtime_frame" src="https://github.com/user-attachments/assets/a06c9c9f-a3c7-4c19-90ba-7ea489a55e2e" />
+
 
 ## Supporting artifacts
 

@@ -10,7 +10,3 @@ This folder contains technical evidence from the final tested AutoNav workflow.
 - [slam/README.md](slam/README.md): SLAM/RGB-D odometry replay status and artifacts
 - [yolo/README.md](yolo/README.md): YOLO prototype status and smoke-test references
 - [testing_reproducibility/README.md](testing_reproducibility/README.md): testing and reproducibility summary data
-
-## Scope statement
-
-These artifacts document engineering status for the final tested AutoNav repository state. Presentation scripts and slide-oriented narration were moved to [../capstone_report_notes.md](../capstone_report_notes.md).
