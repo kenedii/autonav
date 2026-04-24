@@ -18,9 +18,8 @@ The pipeline has been optimized for a **NVIDIA Jetson Nano** mounted on a **LaTr
 **Jetson Nano Prototype (Sensor-Fusion with Depth, IR, and 360 degree FOV)**
 - Jetson Nano 4GB Developer Kit with ARM Cortex-A57 CPU and Fan-4020-PWM-5V, Ubuntu + JetPack
 - LaTrax Rally 1/18 RC car
-- Intel RealSense D435i (sidecar depth + IMU)
-- Front CAM0 fisheye camera for primary forward RGB
-- Rear CAM1 camera for preview / reverse-only support
+- Intel RealSense D435i (front RGB + depth + IMU + IR)
+- Front and rear IMX219-200 RGB Camera 
 - TP-Link TL-WN725N USB WiFi adapter
 - PCA9685 16-channel servo driver
 - Pololu 4-Channel RC Servo Multiplexer
