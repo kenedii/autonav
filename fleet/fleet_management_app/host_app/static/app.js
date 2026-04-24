@@ -6,6 +6,7 @@ let experiments = [];
 let uploadedDeployModelPath = "";
 let uploadedJetsonOptPath = "";
 let uploadedRockchipOptPath = "";
+let uploadedYoloModelPath = "";
 
 let statusChart = null;
 let logTimer = null;
@@ -47,6 +48,18 @@ function activeClientTab() {
     return active ? active.dataset.clientTab : "overview";
 }
 
+function downloadJson(filename, payload) {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
 function setupTopTabs() {
     document.querySelectorAll(".tab-btn").forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -75,6 +88,12 @@ function setupClientTabs() {
                 startLogPolling();
             } else {
                 stopLogPolling();
+            }
+            if (tab === "yolo") {
+                refreshYoloDetections();
+            }
+            if (tab === "slam") {
+                refreshSlamMap();
             }
         });
     });
@@ -202,9 +221,11 @@ async function selectCar(id) {
     uploadedDeployModelPath = "";
     uploadedJetsonOptPath = "";
     uploadedRockchipOptPath = "";
+    uploadedYoloModelPath = "";
     setMessage("uploaded-model-label", "No file uploaded");
     setMessage("trt-upload-state", "No model uploaded");
     setMessage("rknn-upload-state", "No model uploaded");
+    setMessage("yolo-upload-state", "No model uploaded");
     setMessage("deploy-model-path", "");
     setJson("deploy-result", { status: "waiting" });
     setJson("optimize-result", { status: "waiting" });
@@ -242,15 +263,32 @@ async function updateDetailPanel() {
 
     const specs = details.state?.specs || {};
     const modelSummary = {
+        device: car.details?.config?.device || "unknown",
         backend: car.details?.config?.control_model_type || "unknown",
+        controller_backend: car.details?.config?.controller_backend || "unknown",
         model_path: car.details?.config?.control_model || "not set",
+        detection_model: car.details?.config?.detection_model || "not set",
         architecture: car.details?.config?.architecture || specs.resnet_version || "unknown",
         experiment: car.details?.config?.experiment || "unknown",
         sensors: car.details?.config?.experiment_sensors || [],
+        yolo_enabled: (car.details?.config?.action_loop || []).includes("detection"),
+        slam_enabled: (car.details?.config?.action_loop || []).includes("slam"),
         front_camera: car.details?.config?.front_camera || "not set",
         rear_camera: car.details?.config?.rear_camera || "not set"
     };
     setJson("loaded-model-info", modelSummary);
+
+    byId("enable-yolo").checked = modelSummary.yolo_enabled;
+    byId("enable-slam").checked = modelSummary.slam_enabled;
+    byId("yolo-enabled").checked = modelSummary.yolo_enabled;
+    byId("slam-enabled").checked = modelSummary.slam_enabled;
+
+    if ((modelSummary.device || "").toLowerCase() === "rknn") {
+        byId("deploy-runtime-device").value = "rknn";
+    } else {
+        byId("deploy-runtime-device").value = "cuda";
+    }
+    byId("deploy-controller-backend").value = modelSummary.controller_backend === "pca9685" ? "pca9685" : "pico";
 
     populateCameraOptions(specs.cameras || []);
     await refreshPlatformBadge();
@@ -379,8 +417,19 @@ async function deployControlModel() {
     }
 
     const cameras = buildCamerasFromForm();
+    const yoloEnabled = byId("enable-yolo").checked;
+    const slamEnabled = byId("enable-slam").checked;
+    const action_loop = ["control"];
+    if (slamEnabled) action_loop.push("slam");
+    if (yoloEnabled) action_loop.push("detection");
+    action_loop.push("api");
+
+    const runtimeDevice = byId("deploy-runtime-device").value;
+    const selectedModelBackend = byId("deploy-model-backend").value;
+    const effectiveModelBackend = runtimeDevice === "rknn" ? "rockchip" : selectedModelBackend;
+
     const config = {
-        device: "cuda",
+        device: runtimeDevice,
         architecture,
         experiment,
         experiment_features: expInfo ? expInfo.features : [],
@@ -396,12 +445,18 @@ async function deployControlModel() {
         use_depth: byId("use-depth").checked,
         use_ir: byId("use-ir").checked,
         cameras,
-        control_model_type: byId("deploy-model-backend").value,
+        controller_backend: byId("deploy-controller-backend").value,
+        control_model_type: effectiveModelBackend,
         control_model: modelPath,
-        detection_model: "yolov8n.pt",
+        detection_model: uploadedYoloModelPath || byId("yolo-upload-state").dataset.modelPath || "yolov8n.pt",
+        yolo_enabled: yoloEnabled,
+        slam_enabled: slamEnabled,
+        yolo_confidence_threshold: Number(byId("yolo-conf").value || 0.25),
+        yolo_iou_threshold: Number(byId("yolo-iou").value || 0.45),
+        yolo_max_detections: Number(byId("yolo-max-det").value || 100),
         throttle_mode: byId("tune-mode").value,
         fixed_throttle_value: Number(byId("tune-throttle").value || 0.22),
-        action_loop: ["control", "api"]
+        action_loop
     };
 
     const res = await fetch(`/api/cars/${selectedCarId}/config`, {
@@ -415,17 +470,143 @@ async function deployControlModel() {
     if (res.ok) {
         setJson("loaded-model-info", {
             deployed: true,
+            device: config.device,
             backend: config.control_model_type,
+            controller_backend: config.controller_backend,
             architecture: config.architecture,
             experiment: config.experiment,
             sensors: config.experiment_sensors,
             model_path: config.control_model,
+            detection_model: config.detection_model,
+            yolo_enabled: config.yolo_enabled,
+            slam_enabled: config.slam_enabled,
             front_camera: config.front_camera,
             rear_camera: config.rear_camera,
             use_depth: config.use_depth,
             use_ir: config.use_ir
         });
     }
+}
+
+async function uploadYoloModel() {
+    if (!selectedCarId) return;
+    const file = byId("yolo-model-file").files[0];
+    if (!file) {
+        setMessage("yolo-upload-state", "Select a YOLO model file first");
+        return;
+    }
+
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("category", "detection");
+
+    const res = await fetch(`/api/cars/${selectedCarId}/models/upload`, { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+        setJson("yolo-result", data);
+        return;
+    }
+
+    uploadedYoloModelPath = data.path;
+    byId("yolo-upload-state").dataset.modelPath = data.path;
+    setMessage("yolo-upload-state", `Uploaded: ${data.filename}`);
+}
+
+async function applyYoloSettings() {
+    if (!selectedCarId) return;
+    const payload = {
+        enabled: byId("yolo-enabled").checked,
+        model_path: uploadedYoloModelPath || byId("yolo-upload-state").dataset.modelPath || undefined,
+        conf_threshold: Number(byId("yolo-conf").value || 0.25),
+        iou_threshold: Number(byId("yolo-iou").value || 0.45),
+        max_detections: Number(byId("yolo-max-det").value || 100)
+    };
+    const res = await fetch(`/api/cars/${selectedCarId}/yolo/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    setJson("yolo-result", data);
+}
+
+async function refreshYoloDetections() {
+    if (!selectedCarId) return;
+    const res = await fetch(`/api/cars/${selectedCarId}/yolo/detections?limit=200`);
+    const data = await res.json();
+    setJson("yolo-result", data);
+}
+
+async function clearYoloDetections() {
+    if (!selectedCarId) return;
+    const res = await fetch(`/api/cars/${selectedCarId}/yolo/detections`, { method: "DELETE" });
+    const data = await res.json();
+    setJson("yolo-result", data);
+}
+
+async function downloadYoloDetections() {
+    if (!selectedCarId) return;
+    const res = await fetch(`/api/cars/${selectedCarId}/yolo/detections/download`);
+    const data = await res.json();
+    downloadJson(`car_${selectedCarId}_yolo_detections.json`, data);
+}
+
+async function applySlamSettings() {
+    if (!selectedCarId) return;
+    const payload = {
+        enabled: byId("slam-enabled").checked,
+        nav_kp: Number(byId("slam-nav-kp").value || 2.0)
+    };
+    const res = await fetch(`/api/cars/${selectedCarId}/slam/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    setJson("slam-result", data);
+}
+
+async function refreshSlamMap() {
+    if (!selectedCarId) return;
+    const res = await fetch(`/api/cars/${selectedCarId}/slam/map`);
+    const data = await res.json();
+    setJson("slam-result", data);
+}
+
+async function resetSlamMap() {
+    if (!selectedCarId) return;
+    const res = await fetch(`/api/cars/${selectedCarId}/slam/reset`, { method: "POST" });
+    const data = await res.json();
+    setJson("slam-result", data);
+}
+
+async function downloadSlamMap() {
+    if (!selectedCarId) return;
+    const res = await fetch(`/api/cars/${selectedCarId}/slam/map/download`);
+    const data = await res.json();
+    downloadJson(`car_${selectedCarId}_slam_map.json`, data);
+}
+
+async function driveToSlamTarget() {
+    if (!selectedCarId) return;
+    const payload = {
+        x: Number(byId("slam-target-x").value || 0),
+        y: Number(byId("slam-target-y").value || 0)
+    };
+    const res = await fetch(`/api/cars/${selectedCarId}/navigate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    setJson("slam-result", data);
+}
+
+async function cancelSlamNavigation() {
+    if (!selectedCarId) return;
+    const res = await fetch(`/api/cars/${selectedCarId}/navigate/cancel`, { method: "POST" });
+    const data = await res.json();
+    setJson("slam-result", data);
 }
 
 async function refreshPlatformBadge() {
@@ -745,6 +926,19 @@ function wireUiActions() {
     byId("run-trt-btn").addEventListener("click", runTensorRtOptimize);
     byId("rknn-upload-btn").addEventListener("click", uploadRockchipOptimizeModel);
     byId("run-rknn-btn").addEventListener("click", runRknnOptimize);
+
+    byId("yolo-upload-btn").addEventListener("click", uploadYoloModel);
+    byId("yolo-apply-btn").addEventListener("click", applyYoloSettings);
+    byId("yolo-refresh-btn").addEventListener("click", refreshYoloDetections);
+    byId("yolo-clear-btn").addEventListener("click", clearYoloDetections);
+    byId("yolo-download-btn").addEventListener("click", downloadYoloDetections);
+
+    byId("slam-apply-btn").addEventListener("click", applySlamSettings);
+    byId("slam-refresh-btn").addEventListener("click", refreshSlamMap);
+    byId("slam-reset-btn").addEventListener("click", resetSlamMap);
+    byId("slam-download-btn").addEventListener("click", downloadSlamMap);
+    byId("slam-go-btn").addEventListener("click", driveToSlamTarget);
+    byId("slam-cancel-nav-btn").addEventListener("click", cancelSlamNavigation);
 
     byId("video-start-btn").addEventListener("click", startVideoStream);
     byId("video-stop-btn").addEventListener("click", stopVideoStream);

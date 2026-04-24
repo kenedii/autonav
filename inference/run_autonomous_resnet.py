@@ -38,11 +38,16 @@ if DATA_COLLECTION_DIR not in sys.path:
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--backend", default="cuda")
+parser.add_argument(
+    "--backend",
+    default="cuda",
+    choices=["cuda", "rknn"],
+)
 parser.add_argument("--exp", type=int, default=3)
 parser.add_argument("--arch", default="resnet34")
 parser.add_argument("--model-path", default="best_model.pth")
 parser.add_argument("--trt-model-path", default="best_model_trt.pth")
+parser.add_argument("--rknn-model-path", default="best_model.rknn")
 
 parser.add_argument(
     "--camera",
@@ -90,7 +95,8 @@ args = parser.parse_args()
 import realsense_full
 from preprocess_utils import apply_preprocess_profile, infer_preprocess_profile
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+USE_RKNN = args.backend == "rknn"
+DEVICE = torch.device("cuda" if (not USE_RKNN and torch.cuda.is_available()) else "cpu")
 if DEVICE.type == "cuda":
     torch.backends.cudnn.benchmark = True
 
@@ -156,6 +162,47 @@ def torchvision_kwargs():
     else:
         kwargs["pretrained"] = False
     return kwargs
+
+
+class RKNNRuntime:
+
+    def __init__(self, model_path):
+        self.model_path = model_path
+        self.rknn = None
+        self._load()
+
+    def _load(self):
+        try:
+            from rknnlite.api import RKNNLite
+        except ImportError:
+            from rknn.api import RKNN as RKNNLite
+
+        self.rknn = RKNNLite()
+        ret = self.rknn.load_rknn(self.model_path)
+        if ret != 0:
+            raise RuntimeError("Failed to load RKNN model: %s" % self.model_path)
+
+        ret = self.rknn.init_runtime()
+        if ret != 0:
+            raise RuntimeError("Failed to initialize RKNN runtime")
+
+    def infer(self, tensor_cpu):
+        # RKNN runtime here follows the NCHW float32 contract used by fleet client.
+        if hasattr(tensor_cpu, "detach"):
+            inp = tensor_cpu.detach().cpu().numpy().astype(np.float32)
+        else:
+            inp = np.asarray(tensor_cpu, dtype=np.float32)
+        outputs = self.rknn.inference(inputs=[inp])
+        if not outputs:
+            raise RuntimeError("RKNN inference returned no outputs")
+        return np.asarray(outputs[0], dtype=np.float32).reshape(-1)
+
+    def close(self):
+        try:
+            if self.rknn is not None:
+                self.rknn.release()
+        except Exception:
+            pass
 
 
 class PicoSerialController:
@@ -362,6 +409,12 @@ def build_model():
 
 def load_model():
 
+    if USE_RKNN:
+        if not os.path.exists(args.rknn_model_path):
+            raise FileNotFoundError("RKNN model not found: %s" % args.rknn_model_path)
+        print("[LOAD] RKNN model: %s" % args.rknn_model_path)
+        return RKNNRuntime(args.rknn_model_path)
+
     if os.path.exists(args.trt_model_path):
 
         from torch2trt import TRTModule
@@ -387,6 +440,10 @@ model = load_model()
 
 
 def warmup_model():
+    if USE_RKNN:
+        print("[WARMUP] RKNN backend selected; skipping CUDA warmup")
+        return
+
     if args.warmup_iters <= 0:
         return
 
@@ -539,6 +596,12 @@ def cleanup():
         pass
 
     try:
+        if USE_RKNN and hasattr(model, "close"):
+            model.close()
+    except:
+        pass
+
+    try:
         motor_controller.set_us(STEERING_CHANNEL,STEERING_CENTER)
         motor_controller.set_us(THROTTLE_CHANNEL,THROTTLE_CENTER)
         motor_controller.close()
@@ -579,6 +642,7 @@ for _ in range(20):
 # ================= MAIN LOOP =================
 
 print("Autonomous Driving Started")
+print("[RUNTIME] backend=%s controller=%s" % (args.backend, args.controller_backend))
 
 last=time.time()
 count=0
@@ -600,15 +664,17 @@ with torch.inference_mode():
 
         last_frame_seq = frame_seq
 
-        preprocess_start = time.perf_counter()
-        tensor = tensor_cpu.to(DEVICE, non_blocking=True)
-        preprocess_total += time.perf_counter() - preprocess_start
-
         inference_start = time.perf_counter()
-        out = model(tensor)
-        output = out.detach().float().cpu().numpy()[0]
+        if USE_RKNN:
+            output = model.infer(tensor_cpu)
+        else:
+            preprocess_start = time.perf_counter()
+            tensor = tensor_cpu.to(DEVICE, non_blocking=True)
+            preprocess_total += time.perf_counter() - preprocess_start
+            out = model(tensor)
+            output = out.detach().float().cpu().numpy()[0]
         steer = float(output[0])
-        throttle_model = float(output[1])
+        throttle_model = float(output[1]) if len(output) > 1 else 0.0
         inference_total += time.perf_counter() - inference_start
 
         if should_invert_steering():

@@ -7,11 +7,11 @@ import math
 from typing import List, Dict, Any
 
 try:
-    from .hardware import PicoSerialController, get_camera, get_system_specs
+    from .hardware import get_camera, get_system_specs, get_motor_controller
     from .models import AutonomousDriver, ObjectDetector
     from .slam import VisualSlamSystem
 except ImportError:
-    from hardware import PicoSerialController, get_camera, get_system_specs
+    from hardware import get_camera, get_system_specs, get_motor_controller
     from models import AutonomousDriver, ObjectDetector
     from slam import VisualSlamSystem
 
@@ -28,8 +28,15 @@ class CarClient:
             "last_action": None, 
             "fps": 0,
             "detections": [],
+            "detection_count": 0,
+            "yolo_enabled": False,
+            "slam_enabled": False,
+            "slam_map_points": 0,
+            "navigation": {"active": False, "target": None},
             "specs": {}
         }
+        self.detection_history = []
+        self.max_detection_history = 1000
         
         # Get immediate specs
         try:
@@ -119,6 +126,17 @@ class CarClient:
              logger.info(f"Throttle mode set to {mode} (val={value})")
 
     @staticmethod
+    def _build_action_loop(config):
+        base = ["control", "api"]
+        yolo_enabled = bool(config.get("yolo_enabled", "detection" in config.get("action_loop", [])))
+        slam_enabled = bool(config.get("slam_enabled", "slam" in config.get("action_loop", [])))
+        if yolo_enabled:
+            base.insert(1, "detection")
+        if slam_enabled:
+            base.insert(1, "slam")
+        return base
+
+    @staticmethod
     def _extract_control_prediction(prediction):
         if isinstance(prediction, dict):
             steer_norm = float(prediction.get("steering", 0.0))
@@ -150,13 +168,23 @@ class CarClient:
                     config["control_model"] = config["control_model"].replace("jetson:", "")
             if config.get("detection_model"):
                 config["detection_model"] = os.path.expanduser(config["detection_model"])
+            config.setdefault("controller_backend", "pico")
+            config.setdefault("device", "cuda")
+            if config.get("nav_kp") is not None:
+                self.nav_kp = float(config.get("nav_kp"))
+
+            if config.get("pca_address") is None:
+                config["pca_address"] = 0x40
 
             # Set action loop first before initializing hardware/models
-            self.action_loop = config.get("action_loop", ["control", "api"])
+            self.action_loop = self._build_action_loop(config)
+            config["action_loop"] = list(self.action_loop)
+            config["yolo_enabled"] = "detection" in self.action_loop
+            config["slam_enabled"] = "slam" in self.action_loop
             
             # --- Update Specs from Config ---
             try:
-                specs = get_system_specs(config.get("cameras", []))
+                specs = get_system_specs(config.get("cameras", []), config=config)
                 if config.get("architecture"): 
                     specs["resnet_version"] = config["architecture"]
                 if config.get("detection_model"): 
@@ -185,12 +213,16 @@ class CarClient:
             
             # Setup Hardware
             try:
-                if self.motor_controller is None:
-                    self.motor_controller = PicoSerialController()
+                if self.motor_controller:
+                    try:
+                        self.motor_controller.close()
+                    except Exception:
+                        pass
+                self.motor_controller = get_motor_controller(config)
                 self.motor_controller.set_us(self.STEERING_CHANNEL, self.STEERING_CENTER)
                 self.motor_controller.set_us(self.THROTTLE_CHANNEL, self.THROTTLE_CENTER)
             except Exception as e:
-                logger.error(f"Failed to init Pico serial motor controller (Mocking): {e}")
+                logger.error(f"Failed to init motor controller (Mocking): {e}")
                 self.motor_controller = None 
                 
             try:
@@ -224,12 +256,93 @@ class CarClient:
                     self.slam = VisualSlamSystem(width=w, height=h)
                 else:
                     self.slam = None
+                    self.state['location'] = None
+
+                self.state["yolo_enabled"] = self.detection_model is not None
+                self.state["slam_enabled"] = self.slam is not None
+                if self.slam is not None:
+                    self.state["slam_map_points"] = len(self.slam.trajectory)
+                else:
+                    self.state["slam_map_points"] = 0
 
             except Exception as e:
                 logger.error(f"Failed to init Models: {e}")
                 self.control_model = None
                 self.detection_model = None
                 self.slam = None
+
+    def set_navigation_target(self, x, y):
+        self.target_dest = (float(x), float(y))
+        self.state["navigation"] = {"active": True, "target": {"x": float(x), "y": float(y)}}
+
+    def cancel_navigation(self):
+        self.target_dest = None
+        self.state["navigation"] = {"active": False, "target": None}
+
+    def reset_slam(self):
+        if self.slam is None:
+            return False
+        self.slam.reset()
+        self.state["location"] = self.slam._get_state()
+        self.state["slam_map_points"] = 0
+        return True
+
+    def get_slam_map(self):
+        location = self.state.get("location") or {}
+        return {
+            "location": location,
+            "trajectory": location.get("trajectory", []),
+            "target": self.target_dest,
+            "active": self.slam is not None,
+        }
+
+    def get_detection_history(self, limit=200):
+        limit = max(1, min(int(limit), self.max_detection_history))
+        return self.detection_history[-limit:]
+
+    def clear_detection_history(self):
+        self.detection_history = []
+
+    def configure_yolo(self, enabled=None, model_path=None, conf_threshold=None, iou_threshold=None, max_detections=None):
+        was_running = self.running
+        updated = dict(self.config)
+        if enabled is not None:
+            updated["yolo_enabled"] = bool(enabled)
+        if model_path:
+            updated["detection_model"] = model_path
+        if conf_threshold is not None:
+            updated["yolo_confidence_threshold"] = float(conf_threshold)
+        if iou_threshold is not None:
+            updated["yolo_iou_threshold"] = float(iou_threshold)
+        if max_detections is not None:
+            updated["yolo_max_detections"] = int(max_detections)
+        self.configure(updated)
+        if was_running and not self.running:
+            self.start_logic()
+        return {
+            "yolo_enabled": self.state.get("yolo_enabled", False),
+            "detection_model": self.config.get("detection_model"),
+            "thresholds": {
+                "confidence": self.config.get("yolo_confidence_threshold", 0.25),
+                "iou": self.config.get("yolo_iou_threshold", 0.45),
+                "max_detections": self.config.get("yolo_max_detections", 100),
+            },
+        }
+
+    def configure_slam(self, enabled=None, nav_kp=None):
+        was_running = self.running
+        updated = dict(self.config)
+        if enabled is not None:
+            updated["slam_enabled"] = bool(enabled)
+        if nav_kp is not None:
+            self.nav_kp = float(nav_kp)
+        self.configure(updated)
+        if was_running and not self.running:
+            self.start_logic()
+        return {
+            "slam_enabled": self.state.get("slam_enabled", False),
+            "nav_kp": self.nav_kp,
+        }
 
     def start_logic(self):
         # Ensure we have a camera and models, or at least a camera to start the loop
@@ -332,6 +445,7 @@ class CarClient:
                     if dist < 0.2: # Arrived (20cm radius)
                         logger.info(f"Nav: Reached destination {self.target_dest}")
                         self.target_dest = None
+                        self.state["navigation"] = {"active": False, "target": None}
                         override_steer = 0.0
                         # Optional: Stop car?
                         # current_throttle = 0.0
@@ -344,6 +458,12 @@ class CarClient:
                         
                         # Apply Gain
                         override_steer = np.clip(error * self.nav_kp, -1.0, 1.0)
+                        self.state["navigation"] = {
+                            "active": True,
+                            "target": {"x": float(self.target_dest[0]), "y": float(self.target_dest[1])},
+                            "distance_m": float(dist),
+                            "heading_error_rad": float(error),
+                        }
                         # Maybe slow down if turning hard?
                         # if abs(override_steer) > 0.5: current_throttle *= 0.8
 
@@ -407,10 +527,27 @@ class CarClient:
                                     d['distance'] = float(avg_dist)
                     
                     self.state["detections"] = detections
+                    self.state["detection_count"] = len(detections)
+                    timestamp = time.time()
+                    history_entry = {
+                        "timestamp": timestamp,
+                        "count": len(detections),
+                        "detections": detections,
+                    }
+                    self.detection_history.append(history_entry)
+                    if len(self.detection_history) > self.max_detection_history:
+                        self.detection_history = self.detection_history[-self.max_detection_history:]
                     
                 elif action == 'api':
                     # Update state variables that API reads
                     pass
+
+            self.state["yolo_enabled"] = self.detection_model is not None
+            self.state["slam_enabled"] = self.slam is not None
+            if self.slam and self.state.get("location"):
+                self.state["slam_map_points"] = len(self.state["location"].get("trajectory", []))
+            else:
+                self.state["slam_map_points"] = 0
             
             # FPS Calculation
             frame_count += 1
