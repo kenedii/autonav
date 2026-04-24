@@ -17,17 +17,13 @@ This folder summarizes evaluation artifacts for the final tested AutoNav-v2-34 c
 - Steering pseudo-accuracy: 90.01%
 
 ## Plots
+<img width="868" height="735" alt="confusion_left_center_right" src="https://github.com/user-attachments/assets/987e61ab-aade-4cb3-8502-8f29fbae86fc" />
+<img width="1185" height="735" alt="steering_error_histogram" src="https://github.com/user-attachments/assets/ce9b2cd7-7682-472c-bc10-ceab9fd2347a" />
+<img width="885" height="885" alt="steering_pred_vs_true" src="https://github.com/user-attachments/assets/59b603dd-e3b3-4da4-a87f-8f5404861b7d" />
+<img width="885" height="885" alt="throttle_pred_vs_true" src="https://github.com/user-attachments/assets/a93e10de-3729-4d54-a257-9f575b036675" />
 
-![Steering confusion matrix](confusion_left_center_right.png)
-
-![Steering error histogram](steering_error_histogram.png)
-
-![Steering prediction vs truth](steering_pred_vs_true.png)
-
-![Throttle prediction vs truth](throttle_pred_vs_true.png)
 
 ## Supporting artifacts
 
 - [model_eval_metrics.csv](model_eval_metrics.csv)
-- [model_architecture_summary.md](model_architecture_summary.md)
 - [generate_model_eval.py](generate_model_eval.py)
