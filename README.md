@@ -11,11 +11,11 @@ It allows you to take a Single Board Computer with CUDA cores or a Rockchip NPU,
 - Run the model and watch the car autonomously drive around your track
 - Use the Fleet Management Frontend to remotely start/stop vehicle, load new models, camera live view, and view logs.
 
-The pipeline has been optimized for a **NVIDIA Jetson Nano** mounted on a **LaTrax 1/18 RC car** using CUDA inference, or a **Raxda Rock 5B** with a generic toy RC car using RKNN inference. 
+The pipeline has been optimized for a **NVIDIA Jetson Nano** mounted on a **LaTrax 1/18 RC car** using CUDA inference, or a **Radxa Rock 5B** with a generic toy RC car using RKNN inference. 
 
 ## Hardware
 
-**Jetson Nano Prototype (Sensor-Fusion with Depth, IR, and 360 degree FOV)**
+**Jetson Nano Prototype - $1,400 CAD (Sensor-Fusion with Depth, IR, and 360 degree FOV)**
 - Jetson Nano 4GB Developer Kit with ARM Cortex-A57 CPU and Fan-4020-PWM-5V, Ubuntu + JetPack
 - LaTrax Rally 1/18 RC car
 - Intel RealSense D435i (front RGB + depth + IMU + IR)
@@ -27,7 +27,7 @@ The pipeline has been optimized for a **NVIDIA Jetson Nano** mounted on a **LaTr
 
 After model inference, the Jetson Nano outputs steering-angle and throttle predictions. It sends these values over I²C to the PCA9685 servo driver (configured at 50 Hz), which converts them into standard RC PWM pulses (pulse-width in microseconds). The PCA9685 then feeds the PWM signals through the Pololu 4-channel RC servo multiplexer directly to the LaTrax car’s steering servo and electronic speed controller (ESC)
 
-**Radxa Rockchip 5B Prototype (Budget Model, Cheapest Proof-Of-Concept)**
+**Radxa Rockchip 5B Prototype - $175 CAD (Budget Model, Cheapest Proof-Of-Concept)**
 - Radxa Rock 5B with Rockchip RK3588 SoC and Radxa Heatsink 4012, Rock 5B Armbian
 - Raspberry Pi Pico
 - Generic $10 Toy RC Car (WalMart)
