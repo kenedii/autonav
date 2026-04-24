@@ -23,5 +23,4 @@ This folder documents the SLAM / RGB-D odometry prototype status in the final te
 ## Supporting artifacts
 
 - [slam_replay_metrics.csv](slam_replay_metrics.csv)
-- [slam_update_rate.md](slam_update_rate.md)
 - [generate_slam_artifacts.py](generate_slam_artifacts.py)
