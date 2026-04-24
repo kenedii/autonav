@@ -1,0 +1,15 @@
+category,metric,value,confidence,notes
+model,model_path,checkpoints/AutoNav-v2/AutoNav-v2-34/AutoNav-v2-34.pth,high,local checkpoint path
+model,architecture,resnet34,high,inferred from checkpoint state dict
+model,output_dim,2,high,inferred from checkpoint head
+data,usable_labeled_rgb_rows,9535,high,rows with rgb_path + steer_norm + throttle_norm + loadable image
+data,evaluation_samples,1431,high,held-out split size
+split,train_val_test,6674/1430/1431,medium,recreated 70/15/15 split proportions
+eval,steering_mae,0.105376,medium,recovered evaluation on archived raw runs
+eval,throttle_mae,0.128750,medium,recovered evaluation on archived raw runs
+eval,combined_mae,0.117063,medium,mean absolute error across both outputs
+eval,steering_pseudo_accuracy_pct,90.006988,medium,left/center/right bins with thresholds -0.15/+0.15
+eval,left_bin_accuracy_pct,87.333333,medium,per-class recall
+eval,center_bin_accuracy_pct,89.947644,medium,per-class recall
+eval,right_bin_accuracy_pct,91.411043,medium,per-class recall
+eval,readme_94_20_supported,no,high,original combined CSV / original metrics artifact missing from repo snapshot

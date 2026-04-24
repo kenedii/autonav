@@ -208,6 +208,36 @@ PYTHONPATH=fleet/fleet_management_app/client_api pytest tests/test_mission.py -q
 PYTHONPATH=data_collection pytest tests/test_preprocess_utils.py -q
 ```
 
+Known limitation:
+
+- `tests/test_runtime_split.py` reflects an older runtime split and was stale against the final reviewed repo state. Do not present it as part of the passing final validation set unless you update it separately.
+
+## Team Contributions
+
+This project has two members:
+
+- Nicolas Maitland
+- Chris Kenedi / `kenedii`
+
+For the final presentation, contributions should be described by subsystem familiarity rather than exclusive authorship. The Git history is mixed across shared files, so the safest summary is:
+
+- Nicolas Maitland
+  - hardware / Jetson integration
+  - Jetson-side runtime bring-up and live-demo validation
+  - familiarity with the Jetson-side YOLO and SLAM / RGB-D odometry prototype work used during final testing
+
+- Chris Kenedi / `kenedii`
+  - model training workflow
+  - dashboard / API and broader shared codebase implementation
+  - major contributor to the repository foundation
+
+- Shared / collaborative areas
+  - data collection
+  - deployment support
+  - testing / reproducibility / demo support
+
+During code review, present ownership by module familiarity rather than claiming strict one-person ownership of every file.
+
 ## Troubleshooting
 
 If the car is not moving when model is running, run ```sudo bash -c 'i2cset -y 1 0x40 0x00 0x21; i2cset -y 1 0x40 0xFE 0x65; i2cset -y 1 0x40 0x00 0xA1; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x09 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 1; i2cset -y 1 0x40 0x0C 0x00 0x09 && sleep 4; i2cset -y 1 0x40 0x0C 0x00 0x06; echo "FINISHED"'``` (directly writes raw register values via I2C to wake up the PCA9685, set it to 50 Hz, sweep the steering servo fully left → right → center, slam the throttle channel to full forward for 4 seconds, then return everything to neutral)
