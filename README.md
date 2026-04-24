@@ -13,49 +13,6 @@ It allows you to take a Single Board Computer with CUDA cores or a Rockchip NPU,
 
 The pipeline has been optimized for a **NVIDIA Jetson Nano** mounted on a **LaTrax 1/18 RC car** using CUDA inference, or a **Raxda Rock 5B** with a generic toy RC car using RKNN inference. 
 
-## Top-level layout
-
-- `tests/`: Hardware checks and test scripts.
-- `setup/`: Jetson setup and build scripts, including bundled RealSense artifacts.
-- `inference/`: Model optimization and on-car autonomous runtime scripts.
-- `data_collection/`: Data recording, dataset management frontend, and augmentation utilities.
-- `model_training/`: Model training code for both legacy RGB-only and new sensor-combination workflows.
-- `fleet/`: Fleet-facing client + host application code.
-
-## Quick start path
-
-1. Start with setup docs in `setup/README.md`.
-2. Verify controls and hardware using scripts in `tests/README.md`.
-3. Collect data and interact with Data Management Frontend using `data_collection/README.md`.
-4. Train models from `model_training/README.md`.
-5. Optimize/deploy with `inference/README.md`.
-6. Run fleet workflows, manage cars from Fleet Management Frontend with `fleet/fleet_management_app/README.md`.
-
-## Final Presentation / Known-Good State
-
-This repository's known-good final presentation state is:
-
-- Git commit: `9db24f0778a5fc6e02ca1f3eb6a4681f8ced0b95`
-- Branch used for the final technical review: `main`
-- Validated live demo path: Jetson Nano + CAM0 + TensorRT + PCA9685 + `inference/run_autonomous_resnet.py`
-
-For a concise final-presentation summary, see [docs/final_presentation_status.md](docs/final_presentation_status.md).
-
-## Reproduce from GitHub
-
-Use this checklist to reproduce the project at a high level:
-
-1. Clone the repository.
-2. Set up the Jetson environment from `setup/README.md`.
-3. Download the model weights and place them in the expected `checkpoints/` path.
-4. Verify camera, controller, and motor-control hardware using `tests/README.md`.
-5. Collect data with the recorder scripts in `data_collection/`.
-6. Train/evaluate a model with `model_training/`.
-7. Optimize the selected checkpoint with TensorRT from `inference/`.
-8. Run the validated live Jetson demo command below.
-9. Launch the fleet dashboard/client if needed.
-10. Run the targeted regression/API tests listed in `Run the Tests`.
-
 ## Hardware
 
 **Jetson Nano Prototype (Sensor-Fusion with Depth, IR, and 360 degree FOV)**
@@ -96,9 +53,62 @@ When recording with `--camera realsense --record_mode all`, `depth_path` stores 
 - Jetpack 4.6.1 SDK
 - Python 3.6.9
 
+## Top-level layout
+
+- `tests/`: Hardware checks and test scripts.
+- `setup/`: Jetson setup and build scripts, including bundled RealSense artifacts.
+- `inference/`: Model optimization and on-car autonomous runtime scripts.
+- `data_collection/`: Data recording, dataset management frontend, and augmentation utilities.
+- `model_training/`: Model training code for both legacy RGB-only and new sensor-combination workflows.
+- `fleet/`: Fleet-facing client + host application code.
+
+## Quick start path
+
+1. Start with setup docs in `setup/README.md`.
+2. Verify controls and hardware using scripts in `tests/README.md`.
+3. Collect data and interact with Data Management Frontend using `data_collection/README.md`.
+4. Train models from `model_training/README.md`.
+5. Optimize/deploy with `inference/README.md`.
+6. Run fleet workflows, manage cars from Fleet Management Frontend with `fleet/fleet_management_app/README.md`.
+
+Example command:
+
+```bash
+python3 inference/run_autonomous_resnet.py \
+  --arch resnet34 \
+  --exp 3 \
+  --camera cam0 \
+  --cam-backend argus \
+  --cam-sensor-id 0 \
+  --controller-backend pca9685 \
+  --model-path checkpoints/AutoNav-v2/AutoNav-v2-34/AutoNav-v2-34.pth \
+  --trt-model-path inference/best_model_trt.pth \
+  --throttle 0.20 \
+  --no-invert-steering \
+  --debug-timings
+```
+
+- CAM0 is the primary forward RGB source
+- AutoNav-v2-34 / ResNet34 is the active control model
+- TensorRT is the validated Jetson optimization path
+- PCA9685 is the validated motor-control path
+- RealSense is not required for the core live lane-following implementation
+
+## Prototype features
+
+- YOLO
+  - Prototype only
+
+- SLAM
+  - Experimental RGB-D odometry / replay path
+  - Not full production SLAM
+
+- Depth stop
+  - Subsystem / prototype only
+
 ## Known-Good Platform
 
-The final presentation validation path was exercised on:
+The stack the code was exercised on:
 
 - Ubuntu `18.04.6`
 - JetPack `4.6.1`
@@ -107,20 +117,6 @@ The final presentation validation path was exercised on:
 - CAM0 primary RGB input
 - PCA9685 motor control over I2C
 - Intel RealSense D435i as a sidecar / experimental RGB-D/IMU path
-
-## Feature Status
-
-- Lane following: validated live demo path
-  - Primary path is CAM0 + AutoNav-v2-34 + TensorRT + PCA9685 + `inference/run_autonomous_resnet.py`
-- YOLO: prototype / advisory only
-  - Detection path exists in the fleet runtime
-  - Not part of the validated live Jetson control loop
-- SLAM: experimental RGB-D odometry / replay only
-  - Replay and pose-estimation evidence exists
-  - This is not full production SLAM and is not the validated live demo path
-- Depth stop: subsystem / prototype only
-  - RealSense depth utilities exist
-  - This should not be presented as a validated final live-demo safety feature unless re-tested separately
 
 ## Core Features
 
@@ -147,7 +143,7 @@ The project defines multiple model variants through a list called EXPERIMENTS. T
     {"id": 6, "desc": "Front+Back RGB only (Cleaned)",        "csv": CLEANED_CSV,   "features": ['rgb_path', 'cam1_path']}
 ]
 ```
-Experiment 5 and 6 are identical to 1 and 2 respectively, these were just created these to do a training run with non-augmented images only, so they can be ignored. (Using no augmented images performs much worse)
+Experiment 5 and 6 are identical to 1 and 4 respectively, these were just created these to do a training run with non-augmented images only, so they can be ignored. (Using no augmented images performs much worse)
 
 - rgb_path: Front camera on vehicle
 - cam1_path: Back camera on vehicle
@@ -166,8 +162,6 @@ Direct Hugging Face path for that checkpoint family:
 
 `https://huggingface.co/everestt/autonav/tree/main/AutoNav-v2/AutoNav-v2-34`
 
-Model weights are not committed to Git in this repository. Download them separately and place them at the expected local destination above.
-
 The pre-trained AutoNav Models we have available are:
 - AutoNav v1 (Best model: AutoNav-v1-34: Steering Pseudo Accuracy of 72.70%)
   - Predicts normalized steering value from RGB image
@@ -176,39 +170,22 @@ The pre-trained AutoNav Models we have available are:
 
 The Steering Pseudo Accuracy evaluation metric sorts validation images into [Left, Centre, Right] bins and evaluates accuracy to predict a normalized steering value within the correct bin.
 
-The pseudo-accuracy values above are historical reported metrics from project training runs. If you are presenting or reproducing the repo from GitHub, treat them as reported results unless you also regenerate the supporting training artifacts locally.
+The pseudo-accuracy values above are historical reported metrics from project training runs.
 
 Some model training runs were done with a capped throttle value for safety reasons, so it may not predict high throttle values. To convert the normalized throttle prediction from the model output to a [-1.0, 1.0] range, apply the formula: 
 - **new_norm_throttle = max(-1.0, min(1.0, model_output × 3.33))**
 
 *Note: Our pretrained steering models predict +1.0 for left and -1.0 for right. The output value may need to be inverted (multiply by -1) depending on the car motor driver module.*
 
-## Validated Jetson Live Demo Command
+## Demos 
 
-This is the primary validated final-presentation live-demo path:
+### Training Data Example (Post-Augmentations)
+<img width="1650" height="560" alt="augmented_data_train_samples_by_source_examples" src="https://github.com/user-attachments/assets/5bdd33dd-3efb-4e96-9a43-299e4e838777" />
+The images from the top dataset are used in AutoNav v1 Models only.
 
-```bash
-python3 inference/run_autonomous_resnet.py \
-  --arch resnet34 \
-  --exp 3 \
-  --camera cam0 \
-  --cam-backend argus \
-  --cam-sensor-id 0 \
-  --controller-backend pca9685 \
-  --model-path checkpoints/AutoNav-v2/AutoNav-v2-34/AutoNav-v2-34.pth \
-  --trt-model-path inference/best_model_trt.pth \
-  --throttle 0.20 \
-  --no-invert-steering \
-  --debug-timings
-```
+### AutoNav V1 Live Demo
 
-This command reflects the final presentation state:
-
-- CAM0 is the primary forward RGB source
-- AutoNav-v2-34 / ResNet34 is the active control model
-- TensorRT is the validated Jetson optimization path
-- PCA9685 is the validated motor-control path
-- RealSense is not required for the core live lane-following demo
+https://github.com/user-attachments/assets/af635698-d848-48ed-9db1-3eb8aa4ac871
 
 ## Run the Tests
 
@@ -261,20 +238,8 @@ For the final presentation, contributions should be described by subsystem famil
 
 During code review, present ownership by module familiarity rather than claiming strict one-person ownership of every file.
 
-## Demos 
-
-### Training Data Example (Post-Augmentations)
-<img width="1650" height="560" alt="augmented_data_train_samples_by_source_examples" src="https://github.com/user-attachments/assets/5bdd33dd-3efb-4e96-9a43-299e4e838777" />
-The images from the top dataset are used in AutoNav v1 Models only.
-
-### AutoNav V1 Live Demo
-
-https://github.com/user-attachments/assets/af635698-d848-48ed-9db1-3eb8aa4ac871
-
 ## Troubleshooting
 
 If the car is not moving when model is running, run ```sudo bash -c 'i2cset -y 1 0x40 0x00 0x21; i2cset -y 1 0x40 0xFE 0x65; i2cset -y 1 0x40 0x00 0xA1; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x09 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 1; i2cset -y 1 0x40 0x0C 0x00 0x09 && sleep 4; i2cset -y 1 0x40 0x0C 0x00 0x06; echo "FINISHED"'``` (directly writes raw register values via I2C to wake up the PCA9685, set it to 50 Hz, sweep the steering servo fully left → right → center, slam the throttle channel to full forward for 4 seconds, then return everything to neutral)
-
-If the car is not moving when model is running, run ```sudo bash -c 'i2cset -y 1 0x40 0x00 0x21; i2cset -y 1 0x40 0xFE 0x65; i2cset -y 1 0x40 0x00 0xA1; i2cset -y 1 0x40 0x08 0x0600 w && sleep 2; i2cset -y 1 0x40 0x08 0x0900 w && sleep 2; i2cset -y 1 0x40 0x08 0x0600 w && sleep 1; i2cset -y 1 0x40 0x0C 0x0900 w && sleep 4; i2cset -y 1 0x40 0x0C 0x0600 w; echo "FINISHED"'``` (Jetson-compatible word writes that wake up the PCA9685, set it to 50 Hz, sweep the steering servo fully left → right → center, slam the throttle channel to full forward for 4 seconds, then return everything to neutral)
 
 This worked to "warm up" the PCA9685 so the model inference code could run properly.
