@@ -13,6 +13,10 @@ It allows you to take a Single Board Computer with CUDA cores or a Rockchip NPU,
 
 The pipeline has been optimized for a **NVIDIA Jetson Nano** mounted on a **LaTrax 1/18 RC car** using CUDA inference, or a **Radxa Rock 5B** with a generic toy RC car using RKNN inference. 
 
+## ⭐ Like this project?
+
+[![Star this repo](https://img.shields.io/badge/⭐-Star%20this%20repo-yellow)](https://github.com/kenedii/autonav)
+
 ## Hardware
 
 **Jetson Nano Prototype - $1,400 CAD (Sensor-Fusion with Depth, IR, and 360 degree FOV)**
