@@ -215,31 +215,6 @@ Known limitation:
 
 - `tests/test_runtime_split.py` reflects an older runtime split and was stale against the final reviewed repo state. Do not present it as part of the passing final validation set unless you update it separately.
 
-## Team Contributions
-
-This project has two members:
-
-- Nicolas Maitland
-- Chris Kenedi / `kenedii`
-
-For the final presentation, contributions should be described by subsystem familiarity rather than exclusive authorship. The Git history is mixed across shared files, so the safest summary is:
-
-- Nicolas Maitland
-  - hardware / Jetson integration
-  - Jetson-side runtime bring-up and live-demo validation
-  - familiarity with the Jetson-side YOLO and SLAM / RGB-D odometry prototype work used during final testing
-
-- Chris Kenedi / `kenedii`
-  - model training workflow
-  - dashboard / API and broader shared codebase implementation
-  - major contributor to the repository foundation
-
-- Shared / collaborative areas
-  - data collection
-  - deployment support
-  - testing / reproducibility / demo support
-
-During code review, present ownership by module familiarity rather than claiming strict one-person ownership of every file.
 
 ## Troubleshooting
 
